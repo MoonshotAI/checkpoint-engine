@@ -1,0 +1,13 @@
+*.pyc
+/.python-version
+/uv.lock
+*.egg-info
+.pytest_cache
+.coverage
+.mypy_cache
+.ruff_cache
+.DS_Store
+.idea
+build/
+dist/
+_version.py
