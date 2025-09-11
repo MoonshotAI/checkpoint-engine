@@ -9,10 +9,9 @@ import socket
 import subprocess
 import threading
 import time
-import uuid
 from collections import defaultdict
 from datetime import timedelta
-from functools import cached_property, lru_cache
+from functools import lru_cache
 from typing import Callable, NamedTuple
 
 import numpy as np
@@ -82,7 +81,7 @@ class MemoryBufferMetaList(BaseModel):
 
 class DataToGather(MemoryBufferMetaList):
     host_ip: str
-    zmq_socket_path: tuple[str, str]
+    device_uuid: str
 
 
 # 256 bytes alignment when flatten torch tensors to uint8 buffer
@@ -516,13 +515,14 @@ class ParameterServer:
         self._local_rank = self._rank % self._gpu_count
         self._auto_pg = auto_pg
         self._all_hosts = []
-        self._global_socket_paths: list[tuple[str, str]] = []
+        self._global_device_uuids: list[str] = []
 
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
 
         self._device_uuid = _get_physical_gpu_id(self._local_rank)
         self._zmq_ctx = zmq.Context()
+        self._zmq_addr_counter = 0
 
         self._memory_pool: dict[str, list[MemoryBuffer]] = {}
         # dict key is owner_rank, value is a bucket metas list in owner_rank
@@ -583,10 +583,6 @@ class ParameterServer:
         # this works by using torch>=2.5.0
         torch._C._host_emptyCache()
 
-    @cached_property
-    def _zmq_socket_path(self) -> str:
-        return f"ipc://@checkpoint-engine-{uuid.uuid4()}.sock"
-
     def gather_metas(self, checkpoint_name: str):
         """
         Gather the parameter metas from all ranks. This will gather memory_buffer, and other metadatas.
@@ -610,7 +606,7 @@ class ParameterServer:
             ),
             p2p_store_addr=None if self._p2p_store is None else self._p2p_store.addr,
             host_ip=_get_ip(),
-            zmq_socket_path=(self._device_uuid, self._zmq_socket_path),
+            device_uuid=self._device_uuid,
         )
 
         dist.all_gather_object(metas_lst, metas)
@@ -618,20 +614,20 @@ class ParameterServer:
         self._current_global_parameter_metas = {}
         num_parameters = 0
         all_hosts: list[str] = []
-        global_socket_paths: list[tuple[str, str]] = []
+        global_device_uuids: list[str] = []
         for i, metas_buckets in enumerate(metas_lst):
             assert metas_buckets is not None, f"metas_buckets {i} should not be None"
             if i % self._gpu_count == 0 and not self._all_hosts:
                 all_hosts.append(metas_buckets.host_ip)
-            if not self._global_socket_paths:
-                global_socket_paths.append(metas_buckets.zmq_socket_path)
+            if not self._global_device_uuids:
+                global_device_uuids.append(metas_buckets.device_uuid)
             if metas_buckets.memory_buffer_metas_list:
                 self._current_global_parameter_metas[i] = metas_buckets
                 num_parameters += sum(map(lambda x: len(x.metas), metas_buckets.memory_buffer_metas_list))
         if not self._all_hosts:
             self._all_hosts = all_hosts
-        if not self._global_socket_paths:
-            self._global_socket_paths = global_socket_paths
+        if not self._global_device_uuids:
+            self._global_device_uuids = global_device_uuids
         logger.info(f"[rank{self._rank}] gather parameter metas finished, num_parameters: {num_parameters}")
 
     def init_process_group(self, *, master_port: int | None = None, timeout: timedelta = timedelta(minutes=10)):
@@ -695,18 +691,35 @@ class ParameterServer:
             logger.exception(f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} error {e}")
             raise e
 
-    def _get_bucket_size(self, *, disable_h2d_buffer: bool = False) -> tuple[int, bool]:
+    def _bind_zmq_socket(self) -> tuple[zmq.Socket, list[tuple[str, str]]]:
+        zmq_handle = lambda device_uuid: (
+            f"ipc://@checkpoint-engine-{device_uuid}-{self._zmq_addr_counter}.sock"
+        )
+        socket_paths = [(uid, zmq_handle(uid))
+                        for uid in self._global_device_uuids]
+        socket = self._zmq_ctx.socket(zmq.REQ)
+        socket.bind(zmq_handle(self._device_uuid))
+        self._zmq_addr_counter += 1
+        return socket, socket_paths
+
+    def _detect_bucket_size(self, *, disable_h2d_buffer: bool = False) -> tuple[int, bool]:
         GiB_bytes = 1 << 30
         # auto detect bucket size
-        free_bytes_tensor = torch.tensor(
-            int(float(torch.cuda.mem_get_info()[0]) * 0.9),
+        tensor = torch.tensor(
+            [
+                # 90% of current cuda free memory bytes
+                int(float(torch.cuda.mem_get_info()[0]) * 0.9),
+                # we use negative value to reuse allreduce min operation
+                # for getting the max value of zmq_addr_counter in all ranks
+                -self._zmq_addr_counter,
+            ],
             dtype=torch.int64,
             device="cuda",
         )
-        dist.all_reduce(free_bytes_tensor, op=dist.ReduceOp.MIN)
-        free_bytes = free_bytes_tensor.item()
+        dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
+        tensor = tensor.cpu()
+        free_bytes, self._zmq_addr_counter = tensor[0].item(), -tensor[1].item()
         max_tensor_bytes = 0
-        max_bytes = int(os.getenv("PS_MAX_BUCKET_SIZE_GB", 8)) * GiB_bytes
         for items in self._current_global_parameter_metas.values():
             for metas_list in items.memory_buffer_metas_list:
                 for meta in metas_list.metas:
@@ -729,6 +742,7 @@ class ParameterServer:
                 f"max_tensor_bytes {max_tensor_bytes} should be less than free_bytes {free_bytes}"
             )
             disable_h2d_buffer = True
+        max_bytes = int(os.getenv("PS_MAX_BUCKET_SIZE_GB", 8)) * GiB_bytes
         bucket_size = min(max(max_bytes, max_tensor_bytes), free_bytes)
         logger.info(f"[rank{self._rank}] auto detect bucket size {bucket_size / GiB_bytes:.2f} GiB")
         return bucket_size, disable_h2d_buffer
@@ -814,7 +828,7 @@ class ParameterServer:
         # first execute a barrier to avoid subsequent cuda oom
         dist.barrier()
 
-        bucket_size, _ = self._get_bucket_size(disable_h2d_buffer=True)
+        bucket_size, _ = self._detect_bucket_size(disable_h2d_buffer=True)
         buffer = torch.empty(bucket_size * 2, dtype=torch.uint8, device="cuda")
         IPC_BUFFER_NAME = "__ipc_buffer___"
         self._p2p_store.register_named_tensors({IPC_BUFFER_NAME: buffer})
@@ -825,13 +839,12 @@ class ParameterServer:
 
         gidx = 0
         buckets = _gen_h2d_buckets(self._current_global_parameter_metas, bucket_size)
+        socket, socket_paths = self._bind_zmq_socket()
         req_thread = threading.Thread(
             target=req_func,
-            args=(self._global_socket_paths,),
+            args=(socket_paths,),
         )
         req_thread.start()
-        socket = self._zmq_ctx.socket(zmq.REQ)
-        socket.bind(self._zmq_socket_path)
         socket.send_pyobj(handle)
         for owner_rank, bucket in buckets:
             self._logger_rank0(
@@ -891,7 +904,7 @@ class ParameterServer:
 
         logger.info(f"[rank{self._rank}] update checkpoint {checkpoint_name}")
 
-        bucket_size, disable_h2d_buffer = self._get_bucket_size()
+        bucket_size, disable_h2d_buffer = self._detect_bucket_size()
         buckets = _gen_h2d_buckets(self._current_global_parameter_metas, bucket_size)
 
         h2d_buffer: torch.Tensor | None = (
@@ -914,13 +927,12 @@ class ParameterServer:
             if len(buckets_by_owner_rank[owner_rank]) > max_len:
                 max_len = len(buckets_by_owner_rank[owner_rank])
 
+        socket, socket_paths = self._bind_zmq_socket()
         req_thread = threading.Thread(
             target=req_func,
-            args=(self._global_socket_paths,),
+            args=(socket_paths,),
         )
         req_thread.start()
-        socket = self._zmq_ctx.socket(zmq.REQ)
-        socket.bind(self._zmq_socket_path)
         socket.send_pyobj(handle)
 
         gidx = 0

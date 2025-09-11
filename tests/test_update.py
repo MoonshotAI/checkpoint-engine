@@ -1,5 +1,6 @@
 import os
 import random
+import time
 
 import torch
 import zmq
@@ -56,7 +57,7 @@ def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Ten
         assert all(names_to_check.values())
 
     while True:
-        socket_paths = queue.get()
+        socket_paths: list[tuple[str, str]] = queue.get()
         if socket_paths is None:
             break
         names_to_check = {name: False for name in named_tensors.keys()}
@@ -76,8 +77,11 @@ def run():
     proc.start()
     ps.register_checkpoint(checkpoint_name, named_tensors=named_tensors)
     ps.gather_metas(checkpoint_name)
-    ps.update(checkpoint_name, queue.put)
-    ps.update(checkpoint_name, queue.put, ranks=list(range(world_size)))
+    ranks_list = [[], list(range(world_size // 2)), [], list(range(world_size))]
+    for ranks in ranks_list:
+        ps.update(checkpoint_name, queue.put, ranks=ranks)
+        # sleep 3s to wait process group is destroyed
+        time.sleep(3)
     ps.unregister_checkpoint(checkpoint_name)
     queue.put(None)
     proc.join()
