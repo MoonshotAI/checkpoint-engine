@@ -6,8 +6,7 @@ import torch
 import zmq
 from torch.multiprocessing import Queue, get_context
 
-from checkpoint_engine.ps import ParameterServer
-from checkpoint_engine.ps import _get_physical_gpu_id
+from checkpoint_engine.ps import ParameterServer, _get_physical_gpu_id
 from checkpoint_engine.worker import update_weights_from_ipc
 
 
@@ -60,7 +59,7 @@ def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Ten
         socket_paths: list[tuple[str, str]] = queue.get()
         if socket_paths is None:
             break
-        names_to_check = {name: False for name in named_tensors.keys()}
+        names_to_check = dict.fromkeys(named_tensors.keys(), False)
         check_weights(names_to_check, socket_paths)
 
 

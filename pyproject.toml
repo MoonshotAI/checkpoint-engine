@@ -36,3 +36,123 @@ Homepage = "https://github.com/MoonshotAI/checkpoint-engine"
 Repository = "https://github.com/MoonshotAI/checkpoint-engine"
 Documentation = "https://github.com/MoonshotAI/checkpoint-engine"
 "Issue Tracker" = "https://github.com/MoonshotAI/checkpoint-engine/issues"
+
+# Linter tools #################################################################
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+output-format = "full"
+src = ["."]
+
+[tool.ruff.format]
+quote-style = "double"
+docstring-code-format = false
+skip-magic-trailing-comma = false
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # isort
+    "N",       # pep8-naming
+    "UP",      # pyupgrade
+    "ANN",     # flake8-annotations
+    "S",       # flake8-bandit
+    "BLE",     # flake8-blind-except
+    "B",       # flake8-bugbear
+    "COM",     # flake8-commas
+    "C4",      # flake8-comprehensions
+    "EXE",     # flake8-executable
+    "FA",      # flake8-future-annotations
+    "ISC",     # flake8-implicit-str-concat
+    "LOG",     # flake8-logging
+    "PIE",     # flake8-pie
+    "PYI",     # flake8-pyi
+    "Q",       # flake8-quotes
+    "RSE",     # flake8-raise
+    "SIM",     # flake8-simplify
+    "TID",     # flake8-tidy-imports
+    "TC",      # flake8-type-checking
+    "PERF",    # perflint
+    "FURB",    # refurb
+    "TRY",     # tryceratops
+    "RUF",     # ruff
+    "ASYNC",   # flake8-async
+]
+ignore = [
+    "ANN002",  # missing-type-args
+    "ANN003",  # missing-type-kwargs
+    "ANN204",  # missing-return-type-special-method
+    "ANN401",  # any-type
+    "B027",    # empty-method-without-abstract-decorator
+    "B905",    # zip-without-explicit-strict, we use `zip-strict-fixer` instead
+    "C416",    # unnecessary-comprehension
+    "COM812",  # missing-trailing-comma
+    "E501",    # line-too-long
+    "N802",    # invalid-function-name
+    "RUF005",  # collection-literal-concatenation
+    "S101",    # assert
+    "S105",    # hardcoded-password-string
+    "S106",    # hardcoded-password-func-arg
+    "S107",    # hardcoded-password-default
+    "S301",    # suspicious-pickle-usage
+    "S311",    # suspicious-non-cryptographic-random-usage
+    "SIM105",  # suppressible-exception
+    "SIM108",  # if-else-block-instead-of-if-exp
+    "TID252",  # relative-imports
+    "TRY003",  # raise-vanilla-args
+    "TRY400",  # error-instead-of-exception
+    "W505",    # doc-line-too-long
+]
+allowed-confusables = ["，", "。", "：", "？", "！", "、", "（", "）", "；", "“", "”"]
+extend-safe-fixes = [
+    "C408",     # unnecessary-collection-call
+    "E711",     # none-comparison
+    "FURB129",  # readlines-in-for
+    "PERF102",  # incorrect-dict-iterator
+    "PIE810",   # multiple-starts-ends-with
+    "SIM102",   # collapsible-if
+    "TC001",    # typing-only-first-party-import
+    "TC002",    # typing-only-third-party-import
+    "TC003",    # typing-only-standard-library-import
+    "TC004",    # runtime-import-in-type-checking-block
+    "TRY201",   # verbose-raise
+    "UP004",    # useless-object-inheritance
+    "UP008",    # super-call-with-parameters
+    "UP038",    # non-pep604-isinstance
+    "UP039",    # unnecessary-class-parentheses
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = [
+    "F401",    # unused-import
+    "TID252",  # relative-imports
+]
+"test/**/*.py" = [
+    "ANN",
+    "S108",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["checkpoint_engine"]
+known-local-folder = ["checkpoint_engine", "tests"]
+lines-after-imports = 2
+
+[tool.ruff.lint.flake8-annotations]
+allow-star-arg-any = true
+suppress-dummy-args = true
+suppress-none-returning = true
+
+
+[tool.ruff.lint.flake8-type-checking]
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+runtime-evaluated-decorators = ["pydantic.validate_call"]
+
+[tool.ruff.lint.flake8-quotes]
+docstring-quotes = "double"
+multiline-quotes = "double"
+inline-quotes = "double"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
