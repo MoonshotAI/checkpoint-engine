@@ -12,7 +12,7 @@ import time
 from collections import defaultdict
 from datetime import timedelta
 from functools import lru_cache
-from typing import Callable, NamedTuple
+from typing import TYPE_CHECKING, Any, BinaryIO, NamedTuple
 
 import numpy as np
 import requests
@@ -23,9 +23,11 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict
 from safetensors.torch import safe_open
 from torch.multiprocessing.reductions import reduce_tensor
-from typing_extensions import TYPE_CHECKING
+
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from typing_extensions import TypedDict
 
     class FileMeta(TypedDict):
@@ -92,7 +94,7 @@ def _align_size(dtype: torch.dtype, shape: torch.Size) -> int:
     return (dtype.itemsize * shape.numel() + _ALIGN_SIZE - 1) // _ALIGN_SIZE * _ALIGN_SIZE
 
 
-def _to_named_tensor(metas: list[ParameterMeta], offset=0) -> list[dict]:
+def _to_named_tensor(metas: list[ParameterMeta], offset: int = 0) -> list[dict]:
     ret = []
     for meta in metas:
         size = _align_size(meta.dtype, meta.shape)
@@ -109,10 +111,10 @@ def _to_named_tensor(metas: list[ParameterMeta], offset=0) -> list[dict]:
 
 
 def _load_checkpoint_file(file_path: str) -> tuple[int, dict[str, tuple[FileMeta, torch.Tensor]]]:
-    def _safetensors_load(fn) -> dict[str, tuple[FileMeta, torch.Tensor]]:
+    def _safetensors_load(fn: str) -> dict[str, tuple[FileMeta, torch.Tensor]]:
         ret = {}
         with safe_open(fn, framework="pt") as f:
-            for name in f.keys():
+            for name in f.keys():  # noqa: SIM118
                 weight = f.get_tensor(name)
                 meta = {
                     "key": name,
@@ -125,10 +127,10 @@ def _load_checkpoint_file(file_path: str) -> tuple[int, dict[str, tuple[FileMeta
         return ret
 
     # deprecated, will be removed in the future
-    def _fast_np_load(fn) -> dict[str, tuple[FileMeta, torch.Tensor]]:
+    def _fast_np_load(fn: str) -> dict[str, tuple[FileMeta, torch.Tensor]]:
         """load *.np file and return memmap and related tensor meta"""
 
-        def parse_npy_header(fin):
+        def parse_npy_header(fin: BinaryIO) -> dict[str, Any]:
             start = fin.tell()
             major, minor = np.lib.format.read_magic(fin)
             if major == 1 and minor == 0:
@@ -136,7 +138,9 @@ def _load_checkpoint_file(file_path: str) -> tuple[int, dict[str, tuple[FileMeta
             elif major == 2 and minor == 0:
                 read_header_fn = np.lib.format.read_array_header_2_0
             else:
-                raise ValueError(f"unknown version {major}.{minor} when parsing npy header from {fn}")
+                raise ValueError(
+                    f"unknown version {major}.{minor} when parsing npy header from {fn}"
+                )
             shape, is_fortran, dtype = read_header_fn(fin)
             return {
                 "shape": shape,
@@ -192,7 +196,9 @@ def _load_checkpoint_file(file_path: str) -> tuple[int, dict[str, tuple[FileMeta
     return tp_rank, ret
 
 
-def _concat_tp_weights(tp_weights: list[torch.Tensor], tp_concat_dim: int, tp_size: int) -> torch.Tensor:
+def _concat_tp_weights(
+    tp_weights: list[torch.Tensor], tp_concat_dim: int, tp_size: int
+) -> torch.Tensor:
     """Concat tp weights with meta info.
     If meta.concat_dim is -1, meas this is shared tp weights, just use the first weights.
     Else we will cat weights in concat_dim.
@@ -206,7 +212,7 @@ def _concat_tp_weights(tp_weights: list[torch.Tensor], tp_concat_dim: int, tp_si
 
 
 def _get_physical_gpu_id(rank: int) -> str:
-    result = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True)
+    result = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True)  # noqa: S607
     if result.returncode != 0:
         raise ValueError(result.stdout)
     lines = result.stdout.strip().split("\n")
@@ -218,15 +224,17 @@ def _get_physical_gpu_id(rank: int) -> str:
 
 
 @lru_cache(maxsize=1)
-def _get_ip():
+def _get_ip() -> str:
     try:
         # try to get ip from network interface
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
             return s.getsockname()[0]
-    except:
+    except Exception as e:  # noqa: BLE001
         # fallback to get ip from hostname
-        logger.warning("fail to get ip from network interface, fallback to get ip from hostname")
+        logger.warning(
+            f"fail to get ip from network interface, fallback to get ip from hostname: {e}"
+        )
         return socket.gethostbyname(socket.gethostname())
 
 
@@ -245,7 +253,7 @@ def _get_rdma_devices() -> list[str]:
     # if PS_P2P_STORE_RDMA_DEVICES is not set, try to use NCCL_IB_HCA to get RDMA devices
     hca = os.getenv("NCCL_IB_HCA", None)
     if hca:
-        l = hca.split(",")
+        l = hca.split(",")  # noqa: E741
         if len(l) > 1:
             # if NCCL_IB_HCA has multiple values, just return
             return l
@@ -262,24 +270,29 @@ def _get_rdma_devices() -> list[str]:
             continue
         for port in os.listdir(path):
             try:
-                content = open(os.path.join(path, port)).read()
+                with open(os.path.join(path, port)) as f:
+                    content = f.read()
                 if "v" in content:
                     print(f"found rdma device {device} in port {port}: {content.strip()}")
                     devices.append(device)
                     break
-            except Exception:
+            except Exception:  # noqa: BLE001,S110
                 pass
     return devices
 
 
-def _get_my_rdma_device(local_rank: int, gpu_count: int, devices: list[str]):
+def _get_my_rdma_device(local_rank: int, gpu_count: int, devices: list[str]) -> str:
     """
     implement network card device allocation, if network card is "mlx5_0,mlx5_1", then 0-3 will share mlx5_0, 4-7 will share mlx5_1, etc.
     """
     if not devices:
         raise RuntimeError("no rdma devices found")
-    assert len(devices) <= gpu_count, f"rdma devices count {len(devices)} should be less than or equal to gpu count {gpu_count}"
-    assert gpu_count % len(devices) == 0, f"gpu count {gpu_count} should be divisible by rdma devices count {len(devices)}"
+    assert len(devices) <= gpu_count, (
+        f"rdma devices count {len(devices)} should be less than or equal to gpu count {gpu_count}"
+    )
+    assert gpu_count % len(devices) == 0, (
+        f"gpu count {gpu_count} should be divisible by rdma devices count {len(devices)}"
+    )
     return devices[local_rank // (gpu_count // len(devices))]
 
 
@@ -304,8 +317,12 @@ def _load_checkpoint(files: list[str]) -> dict[str, torch.Tensor]:
                     size=1,
                 )
             if parameter_name not in parameter_metas:
-                assert isinstance(meta["dtype"], torch.dtype), f"meta {meta} dtype should be torch.dtype"
-                assert isinstance(meta["shape"], torch.Size), f"meta {meta} shape should be torch.Size"
+                assert isinstance(meta["dtype"], torch.dtype), (
+                    f"meta {meta} dtype should be torch.dtype"
+                )
+                assert isinstance(meta["shape"], torch.Size), (
+                    f"meta {meta} shape should be torch.Size"
+                )
                 parameter_metas[parameter_name] = ParameterMeta(
                     name=parameter_name,
                     shape=meta["shape"],
@@ -318,7 +335,9 @@ def _load_checkpoint(files: list[str]) -> dict[str, torch.Tensor]:
         if tp_meta.concat_dim != -1:
             shape = list(parameter_metas[name].shape)
             shape[tp_meta.concat_dim] = shape[tp_meta.concat_dim] * tp_meta.size
-            parameter_metas[name] = ParameterMeta(name=name, shape=torch.Size(shape), dtype=parameter_metas[name].dtype)
+            parameter_metas[name] = ParameterMeta(
+                name=name, shape=torch.Size(shape), dtype=parameter_metas[name].dtype
+            )
         weights_in_cpu = [parameters_with_tp[name][key] for key in sorted(parameters_with_tp[name])]
         # TODO: here concat is serial, which may be slow
         # but since tp storage is not used in the future
@@ -337,17 +356,19 @@ def _load_checkpoint(files: list[str]) -> dict[str, torch.Tensor]:
 
 def _register_checkpoint(
     *,
-    files: list[str] = [],
-    named_tensors: dict[str, torch.Tensor] = {},
+    files: list[str],
+    named_tensors: dict[str, torch.Tensor],
     rank: int | None = None,
 ) -> list[MemoryBuffer]:
-    logger.info(f"[rank{rank}] start to register checkpoint with {len(files)} files and {len(named_tensors)} named_tensors")
+    logger.info(
+        f"[rank{rank}] start to register checkpoint with {len(files)} files and {len(named_tensors)} named_tensors"
+    )
     if not files and not named_tensors:
         return []
     parameters = _load_checkpoint(files)
     if named_tensors:
         parameters.update(named_tensors)
-    bucket_size = max(4 << 30, max(map(lambda x: _align_size(x.dtype, x.shape), parameters.values())))
+    bucket_size = max(4 << 30, max(_align_size(x.dtype, x.shape) for x in parameters.values()))
 
     class MemoryBucket(BaseModel):
         size: int
@@ -362,7 +383,10 @@ def _register_checkpoint(
         buckets[-1].metas.append(ParameterMeta(name=name, shape=tensor.shape, dtype=tensor.dtype))
         buckets[-1].size += size
 
-    memory_buffers = [MemoryBuffer(buffer=torch.empty(0), size=bucket.size, metas=bucket.metas) for bucket in buckets]
+    memory_buffers = [
+        MemoryBuffer(buffer=torch.empty(0), size=bucket.size, metas=bucket.metas)
+        for bucket in buckets
+    ]
 
     def register_pin_memory(idx: int, size: int) -> tuple[int, torch.Tensor]:
         buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
@@ -372,7 +396,10 @@ def _register_checkpoint(
         buffer[offset : offset + tensor.nbytes] = tensor.view(-1).view(dtype=torch.uint8)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
-        futures = [executor.submit(register_pin_memory, idx, bucket.size) for idx, bucket in enumerate(buckets)]
+        futures = [
+            executor.submit(register_pin_memory, idx, bucket.size)
+            for idx, bucket in enumerate(buckets)
+        ]
         new_futures = []
         for future in concurrent.futures.as_completed(futures):
             idx, buffer = future.result()
@@ -399,7 +426,9 @@ def _register_checkpoint(
     return memory_buffers
 
 
-def request_inference_to_update(url: str, socket_paths: dict[str, str], timeout: float = 300.0):
+def request_inference_to_update(
+    url: str, socket_paths: dict[str, str], timeout: float = 300.0
+) -> None:
     resp = requests.post(
         url,
         json={
@@ -412,7 +441,9 @@ def request_inference_to_update(url: str, socket_paths: dict[str, str], timeout:
     resp.raise_for_status()
 
 
-def _gen_h2d_buckets(global_metas: dict[int, MemoryBufferMetaList], bucket_size: int) -> list[tuple[int, H2DBucket]]:
+def _gen_h2d_buckets(
+    global_metas: dict[int, MemoryBufferMetaList], bucket_size: int
+) -> list[tuple[int, H2DBucket]]:
     buckets: list[tuple[int, H2DBucket]] = []
 
     for owner_rank, items in global_metas.items():
@@ -423,14 +454,18 @@ def _gen_h2d_buckets(global_metas: dict[int, MemoryBufferMetaList], bucket_size:
                 s = _align_size(meta.dtype, meta.shape)
                 if buckets[-1][1].size + s > bucket_size:
                     if offset - start_offset > 0:
-                        buckets[-1][1].ranges.append(BucketRange(idx, start_offset, offset - start_offset))
+                        buckets[-1][1].ranges.append(
+                            BucketRange(idx, start_offset, offset - start_offset)
+                        )
                     start_offset = offset
                     buckets.append((owner_rank, H2DBucket(size=0, ranges=[], items=[])))
                 offset += s
                 buckets[-1][1].size += s
                 buckets[-1][1].items.append(meta)
             buckets[-1][1].ranges.append(BucketRange(idx, start_offset, offset - start_offset))
-        assert buckets[-1][1].size > 0, f"buckets[-1][1].size {buckets[-1][1].size} should be greater than 0"
+        assert buckets[-1][1].size > 0, (
+            f"buckets[-1][1].size {buckets[-1][1].size} should be greater than 0"
+        )
     return buckets
 
 
@@ -469,7 +504,9 @@ class P2PStore:
             raise RuntimeError(f"[rank{self.rank}] fail to initialize transfer engine")
         self.port = self.engine.get_rpc_port()
         self.named_tensors: dict[str, torch.Tensor] = {}
-        logger.info(f"[rank{self.rank}] p2p store initialized, addr is {self.addr}, rdma device is {device}")
+        logger.info(
+            f"[rank{self.rank}] p2p store initialized, addr is {self.addr}, rdma device is {device}"
+        )
 
     @property
     def addr(self) -> str:
@@ -491,12 +528,18 @@ class P2PStore:
         num_unregistered = 0
         for i, name in enumerate(names):
             del self.named_tensors[name]
-            logger.info(f"[rank{self.rank}] p2p store unregister tensor {name} with addr {hex(buffer_addresses[i])}")
+            logger.info(
+                f"[rank{self.rank}] p2p store unregister tensor {name} with addr {hex(buffer_addresses[i])}"
+            )
             num_unregistered += 1
         return num_unregistered
 
-    def batch_transfer_sync_read(self, target_hostname: str, buf_ptrs: list[int], remote_ptrs: list[int], lens: list[int]):
-        assert self.engine.batch_transfer_sync_read(target_hostname, buf_ptrs, remote_ptrs, lens) == 0
+    def batch_transfer_sync_read(
+        self, target_hostname: str, buf_ptrs: list[int], remote_ptrs: list[int], lens: list[int]
+    ):
+        assert (
+            self.engine.batch_transfer_sync_read(target_hostname, buf_ptrs, remote_ptrs, lens) == 0
+        )
 
 
 class ParameterServer:
@@ -535,17 +578,23 @@ class ParameterServer:
 
         torch.cuda.set_device(self._local_rank)
 
-    def _logger_rank0(self, msg):
+    def _logger_rank0(self, msg: str):
         if self._local_rank == 0:
             logger.info(msg)
 
-    def get_metas(self):
+    def get_metas(self) -> dict[int, MemoryBufferMetaList]:
         return self._current_global_parameter_metas
 
     def load_metas(self, metas: dict[int, MemoryBufferMetaList]):
         self._current_global_parameter_metas = metas
 
-    def register_checkpoint(self, checkpoint_name: str, *, files: list[str] = [], named_tensors: dict[str, torch.Tensor] = {}):
+    def register_checkpoint(
+        self,
+        checkpoint_name: str,
+        *,
+        files: list[str] | None = None,
+        named_tensors: dict[str, torch.Tensor] | None = None,
+    ) -> None:
         """
         Register a checkpoint to the parameter server. Both files and named_tensors will be registered together.
 
@@ -555,12 +604,18 @@ class ParameterServer:
             named_tensors: The named tensors to register.
         """
         try:
-            assert checkpoint_name not in self._memory_pool, f"checkpoint {checkpoint_name} already registered"
-            self._memory_pool[checkpoint_name] = _register_checkpoint(files=files, named_tensors=named_tensors, rank=self._rank)
+            assert checkpoint_name not in self._memory_pool, (
+                f"checkpoint {checkpoint_name} already registered"
+            )
+            self._memory_pool[checkpoint_name] = _register_checkpoint(
+                files=files or [], named_tensors=named_tensors or {}, rank=self._rank
+            )
             if self._p2p_store is not None:
                 self._register_parameters_to_p2p_store(checkpoint_name)
         except Exception:
-            logger.exception(f"[rank{self._rank}] fail to register checkpoint {checkpoint_name} with files {files}")
+            logger.exception(
+                f"[rank{self._rank}] fail to register checkpoint {checkpoint_name} with files {files}"
+            )
             if self._p2p_store is not None:
                 self._unregister_parameters_from_p2p_store(checkpoint_name)
             self.unregister_checkpoint(checkpoint_name)
@@ -594,16 +649,14 @@ class ParameterServer:
         assert dist.is_initialized(), "process group is not initialized"
         metas_lst: list[DataToGather | None] = [None for _ in range(self._world_size)]  # type: ignore
         metas = DataToGather(
-            memory_buffer_metas_list=list(
-                map(
-                    lambda x: MemoryBufferMetas(
-                        metas=x.metas,
-                        ptr=x.buffer.data_ptr(),
-                        size=x.size,
-                    ),
-                    self._memory_pool.get(checkpoint_name, []),
-                ),
-            ),
+            memory_buffer_metas_list=[
+                MemoryBufferMetas(
+                    metas=x.metas,
+                    ptr=x.buffer.data_ptr(),
+                    size=x.size,
+                )
+                for x in self._memory_pool.get(checkpoint_name, [])
+            ],
             p2p_store_addr=None if self._p2p_store is None else self._p2p_store.addr,
             host_ip=_get_ip(),
             device_uuid=self._device_uuid,
@@ -623,14 +676,18 @@ class ParameterServer:
                 global_device_uuids.append(metas_buckets.device_uuid)
             if metas_buckets.memory_buffer_metas_list:
                 self._current_global_parameter_metas[i] = metas_buckets
-                num_parameters += sum(map(lambda x: len(x.metas), metas_buckets.memory_buffer_metas_list))
+                num_parameters += sum(len(x.metas) for x in metas_buckets.memory_buffer_metas_list)
         if not self._all_hosts:
             self._all_hosts = all_hosts
         if not self._global_device_uuids:
             self._global_device_uuids = global_device_uuids
-        logger.info(f"[rank{self._rank}] gather parameter metas finished, num_parameters: {num_parameters}")
+        logger.info(
+            f"[rank{self._rank}] gather parameter metas finished, num_parameters: {num_parameters}"
+        )
 
-    def init_process_group(self, *, master_port: int | None = None, timeout: timedelta = timedelta(minutes=10)):
+    def init_process_group(
+        self, *, master_port: int | None = None, timeout: timedelta = timedelta(minutes=10)
+    ):
         """
         Initialize the process group for the ranks. This global group can be easily destroyed by calling dist.destroy_process_group.
 
@@ -639,9 +696,19 @@ class ParameterServer:
             timeout: The timeout of the process group.
         """
         store = dist.TCPStore(
-            self._master_addr, _get_master_port(master_port), self._world_size, timeout=timeout, is_master=self._rank == 0
+            self._master_addr,
+            _get_master_port(master_port),
+            self._world_size,
+            timeout=timeout,
+            is_master=self._rank == 0,
         )
-        dist.init_process_group(backend="nccl", world_size=self._world_size, rank=self._rank, timeout=timeout, store=store)
+        dist.init_process_group(
+            backend="nccl",
+            world_size=self._world_size,
+            rank=self._rank,
+            timeout=timeout,
+            store=store,
+        )
         logger.info(f"[rank{self._rank}] init process group successfully.")
 
     def update(
@@ -649,8 +716,8 @@ class ParameterServer:
         checkpoint_name: str,
         req_func: Callable[[list[tuple[str, str]]], None],
         *,
-        ranks: list[int] = [],
-    ):
+        ranks: list[int] | None = None,
+    ) -> None:
         """
         Update the checkpoint to inference engine. This function should be called after gather_metas.
 
@@ -663,6 +730,7 @@ class ParameterServer:
                 which is useful in disaggregated architecture.
         """
         try:
+            # if both ranks is None or [], it will use fully broadcast to update to all ranks
             if not ranks:
                 if self._auto_pg and not dist.is_initialized():
                     self.init_process_group()
@@ -688,22 +756,23 @@ class ParameterServer:
                 f"reserved {torch.cuda.memory_reserved() / 1024 / 1024} MB."
             )
         except Exception as e:
-            logger.exception(f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} error {e}")
-            raise e
+            logger.exception(
+                f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} error {e}"
+            )
+            raise
 
     def _bind_zmq_socket(self) -> tuple[zmq.Socket, list[tuple[str, str]]]:
-        zmq_handle = lambda device_uuid: (
-            f"ipc://@checkpoint-engine-{device_uuid}-{self._zmq_addr_counter}.sock"
-        )
-        socket_paths = [(uid, zmq_handle(uid))
-                        for uid in self._global_device_uuids]
+        def zmq_handle(device_uuid: str) -> str:
+            return f"ipc://@checkpoint-engine-{device_uuid}-{self._zmq_addr_counter}.sock"
+
+        socket_paths = [(uid, zmq_handle(uid)) for uid in self._global_device_uuids]
         socket = self._zmq_ctx.socket(zmq.REQ)
         socket.bind(zmq_handle(self._device_uuid))
         self._zmq_addr_counter += 1
         return socket, socket_paths
 
     def _detect_bucket_size(self, *, disable_h2d_buffer: bool = False) -> tuple[int, bool]:
-        GiB_bytes = 1 << 30
+        GiB = 1 << 30  # noqa: N806
         # auto detect bucket size
         tensor = torch.tensor(
             [
@@ -742,19 +811,27 @@ class ParameterServer:
                 f"max_tensor_bytes {max_tensor_bytes} should be less than free_bytes {free_bytes}"
             )
             disable_h2d_buffer = True
-        max_bytes = int(os.getenv("PS_MAX_BUCKET_SIZE_GB", 8)) * GiB_bytes
+        max_bytes = int(os.getenv("PS_MAX_BUCKET_SIZE_GB", 8)) * GiB
         bucket_size = min(max(max_bytes, max_tensor_bytes), free_bytes)
-        logger.info(f"[rank{self._rank}] auto detect bucket size {bucket_size / GiB_bytes:.2f} GiB")
+        logger.info(f"[rank{self._rank}] auto detect bucket size {bucket_size / GiB:.2f} GiB")
         return bucket_size, disable_h2d_buffer
 
-    def _copy_to_buffer(self, checkpoint_name: str, bucket: H2DBucket, buffer: torch.Tensor, owner_rank: int | None = None):
+    def _copy_to_buffer(
+        self,
+        checkpoint_name: str,
+        bucket: H2DBucket,
+        buffer: torch.Tensor,
+        owner_rank: int | None = None,
+    ):
         offset = 0
         if owner_rank is not None:
             buf_ptrs, remote_ptrs, lens = [], [], []
             ptr_base = buffer.data_ptr()
             target_addr, ptrs = self._get_addr_ptrs(owner_rank)
         for b in bucket.ranges:
-            assert offset + b.size <= bucket.size, f"offset {offset} + size {b.size} > bucket_size {bucket.size}"
+            assert offset + b.size <= bucket.size, (
+                f"offset {offset} + size {b.size} > bucket_size {bucket.size}"
+            )
             if owner_rank is not None:
                 buf_ptrs.append(ptr_base + offset)
                 remote_ptrs.append(ptrs[b.idx][0] + b.offset)
@@ -772,7 +849,11 @@ class ParameterServer:
         torch.cuda.synchronize()
 
     def init_process_group_for_ranks(
-        self, ranks: list[int], *, master_port: int | None = None, timeout: timedelta = timedelta(minutes=10)
+        self,
+        ranks: list[int],
+        *,
+        master_port: int | None = None,
+        timeout: timedelta = timedelta(minutes=10),
     ):
         """
         Initialize the process group for the ranks. This global group can be easily destroyed by calling dist.destroy_process_group.
@@ -801,8 +882,12 @@ class ParameterServer:
         # and will not participate in this update. Since they have registered memory addresses
         # to p2p_store at the beginning, update ranks can directly get the memory addresses
         # from other nodes and put the weights into the buffer.
-        store = dist.TCPStore(master_addr, master_port, len(ranks), is_master=rank == 0, timeout=timeout)
-        dist.init_process_group(backend="nccl", world_size=len(ranks), rank=rank, timeout=timeout, store=store)
+        store = dist.TCPStore(
+            master_addr, master_port, len(ranks), is_master=rank == 0, timeout=timeout
+        )
+        dist.init_process_group(
+            backend="nccl", world_size=len(ranks), rank=rank, timeout=timeout, store=store
+        )
 
     def _update_per_bucket_p2p(
         self,
@@ -814,7 +899,9 @@ class ParameterServer:
         assert ranks, "ranks should be set"
         if len(self._current_global_parameter_metas) == 0:
             raise ValueError("parameter metas is empty")
-        assert dist.is_initialized(), "process group is not initialized when update model per bucket p2p"
+        assert dist.is_initialized(), (
+            "process group is not initialized when update model per bucket p2p"
+        )
 
         need_update = self._rank in ranks
         logger.info(
@@ -830,14 +917,13 @@ class ParameterServer:
 
         bucket_size, _ = self._detect_bucket_size(disable_h2d_buffer=True)
         buffer = torch.empty(bucket_size * 2, dtype=torch.uint8, device="cuda")
-        IPC_BUFFER_NAME = "__ipc_buffer___"
-        self._p2p_store.register_named_tensors({IPC_BUFFER_NAME: buffer})
+        ipc_buffer_name = "__ipc_buffer___"
+        self._p2p_store.register_named_tensors({ipc_buffer_name: buffer})
         logger.info(
             f"[rank{self._rank}] register buffer, shape={buffer.shape}, dtype={buffer.dtype}, data_ptr={buffer.data_ptr()}, nbytes={buffer.nbytes}"
         )
         handle = reduce_tensor(buffer)
 
-        gidx = 0
         buckets = _gen_h2d_buckets(self._current_global_parameter_metas, bucket_size)
         socket, socket_paths = self._bind_zmq_socket()
         req_thread = threading.Thread(
@@ -846,7 +932,7 @@ class ParameterServer:
         )
         req_thread.start()
         socket.send_pyobj(handle)
-        for owner_rank, bucket in buckets:
+        for gidx, (owner_rank, bucket) in enumerate(buckets):
             self._logger_rank0(
                 f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} owner_rank {owner_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
             )
@@ -858,7 +944,6 @@ class ParameterServer:
             socket.recv()
             dist.barrier()
             socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
-            gidx += 1
 
         socket.recv()
         socket.send_pyobj(None)
@@ -866,7 +951,7 @@ class ParameterServer:
         req_thread.join()
         dist.barrier()
         socket.close()
-        self._p2p_store.unregister_named_tensors([IPC_BUFFER_NAME])
+        self._p2p_store.unregister_named_tensors([ipc_buffer_name])
         torch.cuda.empty_cache()
 
     def _get_addr_ptrs(self, owner_rank: int) -> tuple[str, list[tuple[int, int]]]:
@@ -890,7 +975,9 @@ class ParameterServer:
         pool = self._memory_pool[checkpoint_name]
         if len(pool) == 0:
             return 0
-        return self._p2p_store.unregister_named_tensors([f"memory_pool_{checkpoint_name}_{idx}" for idx, _ in enumerate(pool)])
+        return self._p2p_store.unregister_named_tensors(
+            [f"memory_pool_{checkpoint_name}_{idx}" for idx, _ in enumerate(pool)]
+        )
 
     def _update_per_bucket(
         self,
@@ -908,7 +995,9 @@ class ParameterServer:
         buckets = _gen_h2d_buckets(self._current_global_parameter_metas, bucket_size)
 
         h2d_buffer: torch.Tensor | None = (
-            None if disable_h2d_buffer else torch.empty(bucket_size, dtype=torch.uint8, device="cuda")
+            None
+            if disable_h2d_buffer
+            else torch.empty(bucket_size, dtype=torch.uint8, device="cuda")
         )
 
         owner_rank_buckets: list[H2DBucket] = []
@@ -944,7 +1033,10 @@ class ParameterServer:
                 if i >= len(_buckets):
                     continue
                 bucket = _buckets[i]
-                alloc, reserved = torch.cuda.memory_allocated() / 1024 / 1024, torch.cuda.memory_reserved() / 1024 / 1024
+                alloc, reserved = (
+                    torch.cuda.memory_allocated() / 1024 / 1024,
+                    torch.cuda.memory_reserved() / 1024 / 1024,
+                )
                 self._logger_rank0(
                     f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} owner_rank {owner_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
                     f"Current CUDA allocated {alloc:.2f} MB, "
@@ -972,7 +1064,7 @@ class ParameterServer:
         torch.cuda.empty_cache()
 
 
-def _init_api(ps: ParameterServer):
+def _init_api(ps: ParameterServer) -> Any:
     import fastapi
     from fastapi import Request
     from fastapi.responses import JSONResponse, Response
@@ -988,32 +1080,32 @@ def _init_api(ps: ParameterServer):
         inference_group_ranks: list[int] = []
         timeout: float = 300.0
 
-    def wrap_exception(func):
+    def wrap_exception(func: Callable[[], None]) -> Response:
         try:
             func()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.exception(f"wrap exception {func} failed")
             return JSONResponse(content=str(e), status_code=500)
         return Response(status_code=200)
 
     @app.post("/v1/checkpoints/{checkpoint_name}/files")
-    async def register_files(checkpoint_name: str, req: RegisterRequest, raw: Request):
+    async def register_files(checkpoint_name: str, req: RegisterRequest, raw: Request) -> Response:
         return wrap_exception(lambda: ps.register_checkpoint(checkpoint_name, files=req.files))
 
     @app.delete("/v1/checkpoints/{checkpoint_name}")
-    async def unregister_checkpoint(checkpoint_name: str):
+    async def unregister_checkpoint(checkpoint_name: str) -> Response:
         return wrap_exception(lambda: ps.unregister_checkpoint(checkpoint_name))
 
     @app.get("/v1/healthz")
-    async def healthz():
+    async def healthz() -> Response:
         return Response(status_code=200)
 
     @app.post("/v1/checkpoints/{checkpoint_name}/gather-metas")
-    async def gather_metas(checkpoint_name: str):
+    async def gather_metas(checkpoint_name: str) -> Response:
         return wrap_exception(lambda: ps.gather_metas(checkpoint_name))
 
     @app.post("/v1/checkpoints/{checkpoint_name}/update")
-    async def update(checkpoint_name: str, req: UpdateRequest):
+    async def update(checkpoint_name: str, req: UpdateRequest) -> Response:
         def update_func(socket_paths: list[tuple[str, str]]):
             if req.update_url is None:
                 return
@@ -1030,11 +1122,13 @@ def _init_api(ps: ParameterServer):
 def run_from_cli():
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="Paramter Server")
+    parser = argparse.ArgumentParser(description="Parameter Server")
     parser.add_argument("--uds", type=str)
 
     args = parser.parse_args()
-    logger.info(f"Parameter Server {args=}, master addr: {os.getenv('MASTER_ADDR')}, master port {os.getenv('MASTER_PORT')}")
+    logger.info(
+        f"Parameter Server {args=}, master addr: {os.getenv('MASTER_ADDR')}, master port {os.getenv('MASTER_PORT')}"
+    )
 
     assert args.uds and len(args.uds) > 0, args.uds
     ps = ParameterServer(auto_pg=True)

@@ -1,11 +1,12 @@
 import gc
-from typing import Callable, Optional, TypedDict
+from collections.abc import Callable
+from typing import TypedDict
 
 import torch
 import zmq
 
 
-def _rebuild_ipc(handle: tuple[Callable, tuple], device_id: Optional[int] = None) -> torch.Tensor:
+def _rebuild_ipc(handle: tuple[Callable, tuple], device_id: int | None = None) -> torch.Tensor:
     func, args = handle
     list_args = list(args)
     if device_id is not None:
@@ -24,12 +25,14 @@ class FlattenedTensorMetadata(TypedDict):
     offset: int
 
 
-def _extract_weights(payload: list[FlattenedTensorMetadata], buffer: torch.Tensor) -> list[tuple[str, torch.Tensor]]:
+def _extract_weights(
+    payload: list[FlattenedTensorMetadata], buffer: torch.Tensor
+) -> list[tuple[str, torch.Tensor]]:
     assert buffer is not None
     weights: list[tuple[str, torch.Tensor]] = []
     for item in payload:
         shape = item["shape"]
-        if isinstance(shape, (list, tuple)):
+        if isinstance(shape, list | tuple):
             shape = torch.Size(shape)
         assert isinstance(shape, torch.Size)
         dtype, offset = item["dtype"], item["offset"]
@@ -45,11 +48,11 @@ def update_weights_from_ipc(
     device_id: int,
     *,
     run: Callable[[list[tuple[str, torch.Tensor]]], None],
-    post_hook: Callable[[], None] = None,
+    post_hook: Callable[[], None] | None = None,
 ):
     socket = zmq_ctx.socket(zmq.REP)
     socket.connect(zmq_handle)
-    buffer: Optional[torch.Tensor] = None
+    buffer: torch.Tensor | None = None
     while True:
         payload: tuple[Callable, tuple] | list[FlattenedTensorMetadata] | None = socket.recv_pyobj()
         if payload is None:
@@ -100,5 +103,7 @@ class VllmColocateWorkerExtension:
             zmq_handles[device_uuid],
             device_id=self.device.index,
             run=self.model_runner.model.load_weights,
-            post_hook=lambda: process_weights_after_loading(self.model_runner.model, self.model_config, self.device),
+            post_hook=lambda: process_weights_after_loading(
+                self.model_runner.model, self.model_config, self.device
+            ),
         )

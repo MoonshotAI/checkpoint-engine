@@ -4,8 +4,9 @@ import os
 import pickle
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Callable, Literal
+from typing import Literal
 
 import requests
 import torch
@@ -30,9 +31,9 @@ def check_vllm_ready(endpoint: str, inference_parallel_size: int):
     retry_num = 0
     while True:
         try:
-            response = requests.get(f"{endpoint}/health")
+            response = requests.get(f"{endpoint}/health", timeout=10)
             response.raise_for_status()
-            return
+            break
         except requests.exceptions.RequestException as e:
             retry_num += 1
             logger.warning(f"fail to check vllm ready, retry {retry_num} times, error: {e}")
@@ -41,7 +42,8 @@ def check_vllm_ready(endpoint: str, inference_parallel_size: int):
 
 def split_checkpoint_files(checkpoint_path: str, rank: int, world_size: int) -> list[str]:
     checkpoint_files = [
-        os.path.join(checkpoint_path, f) for f in filter(lambda x: x.endswith(".safetensors"), os.listdir(checkpoint_path))
+        os.path.join(checkpoint_path, f)
+        for f in filter(lambda x: x.endswith(".safetensors"), os.listdir(checkpoint_path))
     ]
     files_per_rank = (len(checkpoint_files) + world_size - 1) // world_size
     return checkpoint_files[rank * files_per_rank : (rank + 1) * files_per_rank]
@@ -49,7 +51,7 @@ def split_checkpoint_files(checkpoint_path: str, rank: int, world_size: int) -> 
 
 def split_tensors(checkpoint_path: str, rank: int, world_size: int) -> dict[str, torch.Tensor]:
     index_fn = os.path.join(checkpoint_path, "model.safetensors.index.json")
-    with open(index_fn, "r") as f:
+    with open(index_fn) as f:
         weight_map: dict[str, str] = json.load(f)["weight_map"]
     weights_per_rank = (len(weight_map) + world_size - 1) // world_size
     fn_tensors: dict[str, list[str]] = defaultdict(list)
@@ -64,7 +66,9 @@ def split_tensors(checkpoint_path: str, rank: int, world_size: int) -> dict[str,
     return named_tensors
 
 
-def req_inference(endpoint: str, inference_parallel_size: int):
+def req_inference(
+    endpoint: str, inference_parallel_size: int
+) -> Callable[[list[tuple[str, str]]], None]:
     rank = int(os.getenv("RANK", None))
     src = rank // inference_parallel_size * inference_parallel_size
 
@@ -128,7 +132,9 @@ def join(
     with timer("Gather metas before join"):
         ps.gather_metas(checkpoint_name)
     ps.load_metas(metas)
-    with timer(f"Update weights with setting ranks as range(0, {inference_parallel_size}) by using p2p"):
+    with timer(
+        f"Update weights with setting ranks as range(0, {inference_parallel_size}) by using p2p"
+    ):
         ps.update(checkpoint_name, req_func, ranks=list(range(inference_parallel_size)))
 
 
@@ -148,7 +154,14 @@ if __name__ == "__main__":
     req_func = req_inference(args.endpoint, args.inference_parallel_size)
     ps = ParameterServer(auto_pg=True)
     if args.load_metas_file:
-        join(ps, args.checkpoint_name, args.load_metas_file, req_func, args.inference_parallel_size, args.endpoint)
+        join(
+            ps,
+            args.checkpoint_name,
+            args.load_metas_file,
+            req_func,
+            args.inference_parallel_size,
+            args.endpoint,
+        )
     else:
         if os.path.exists(os.path.join(args.checkpoint_path, "model.safetensors.index.json")):
             named_tensors = split_tensors(args.checkpoint_path, rank, world_size)
