@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import timedelta
 from functools import cached_property, lru_cache
 from typing import Callable, NamedTuple
@@ -958,6 +959,51 @@ class ParameterServer:
         dist.barrier()
         socket.close()
         torch.cuda.empty_cache()
+
+    @contextmanager
+    def _timer(self, msg: str):
+        """Context manager for timing operations."""
+        start = time.perf_counter()
+        yield
+        end = time.perf_counter()
+        logger.info(f"{msg} duration: {end - start:.2f} seconds")
+
+    def join(
+        self,
+        checkpoint_name: str,
+        save_metas_file: str,
+        req_func: Callable[[list[tuple[str, str]]], None],
+        inference_parallel_size: int,
+        endpoint: str,
+        check_inference_ready_func: Callable[[str, int], None] | None = None,
+    ):
+        """
+        Join a checkpoint update process using pre-saved metadata.
+        
+        Args:
+            checkpoint_name: The name of the checkpoint.
+            save_metas_file: Path to the file containing saved metadata.
+            req_func: The function to request the inference of inference engine.
+            inference_parallel_size: The inference parallel size.
+            endpoint: The endpoint to check vllm readiness.
+            check_inference_ready_func: Optional function to check if vllm is ready. 
+                                   If None, no readiness check is performed.
+        """
+        assert save_metas_file, "save_metas_file is required"
+        with open(save_metas_file, "rb") as f:
+            metas = pickle.load(f)
+        self.init_process_group()
+        
+        # Call the check_vllm_ready function if provided
+        if check_inference_ready_func is not None:
+            check_inference_ready_func(endpoint, inference_parallel_size)
+        
+        dist.barrier()
+        with self._timer("Gather metas before join"):
+            self.gather_metas(checkpoint_name)
+        self.load_metas(metas)
+        with self._timer(f"Update weights with setting ranks as range(0, {inference_parallel_size}) by using p2p"):
+            self.update(checkpoint_name, req_func, ranks=list(range(inference_parallel_size)))
 
 
 def _init_api(ps: ParameterServer):

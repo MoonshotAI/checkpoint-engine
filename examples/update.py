@@ -111,25 +111,6 @@ def update_weights(
             ps.update(checkpoint_name, req_func, ranks=list(range(inference_parallel_size)))
 
 
-def join(
-    ps: ParameterServer,
-    checkpoint_name: str,
-    save_metas_file: str,
-    req_func: Callable[[list[tuple[str, str]]], None],
-    inference_parallel_size: int,
-    endpoint: str,
-):
-    assert save_metas_file, "save_metas_file is required"
-    with open(save_metas_file, "rb") as f:
-        metas = pickle.load(f)
-    ps.init_process_group()
-    check_vllm_ready(endpoint, inference_parallel_size)
-    dist.barrier()
-    with timer("Gather metas before join"):
-        ps.gather_metas(checkpoint_name)
-    ps.load_metas(metas)
-    with timer(f"Update weights with setting ranks as range(0, {inference_parallel_size}) by using p2p"):
-        ps.update(checkpoint_name, req_func, ranks=list(range(inference_parallel_size)))
 
 
 if __name__ == "__main__":
@@ -148,7 +129,7 @@ if __name__ == "__main__":
     req_func = req_inference(args.endpoint, args.inference_parallel_size)
     ps = ParameterServer(auto_pg=True)
     if args.load_metas_file:
-        join(ps, args.checkpoint_name, args.load_metas_file, req_func, args.inference_parallel_size, args.endpoint)
+        ps.join(args.checkpoint_name, args.load_metas_file, req_func, args.inference_parallel_size, args.endpoint, check_vllm_ready_func=check_vllm_ready)
     else:
         if os.path.exists(os.path.join(args.checkpoint_path, "model.safetensors.index.json")):
             named_tensors = split_tensors(args.checkpoint_path, rank, world_size)
