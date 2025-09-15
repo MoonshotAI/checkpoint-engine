@@ -12,7 +12,7 @@ import time
 from collections import defaultdict
 from datetime import timedelta
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, BinaryIO, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, NamedTuple
 
 import numpy as np
 import requests
@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 import zmq
 from loguru import logger
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, PlainSerializer, PlainValidator, WithJsonSchema
 from safetensors.torch import safe_open
 from torch.multiprocessing.reductions import reduce_tensor
 
@@ -38,16 +38,44 @@ if TYPE_CHECKING:
         tp_concat_dim: int
 
 
-class ParameterMeta(BaseModel):
-    # now all classes are changed to pydantic BaseModel
-    # it will directly report validation errors for unknown types
-    # like torch.dtype, torch.Size, so we need this configuration
-    # see https://docs.pydantic.dev/latest/api/config/#pydantic.config.ConfigDict.validate_assignment
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+def _dt_validate(value: Any) -> torch.dtype:
+    if isinstance(value, str):
+        assert value.startswith("torch."), f"dtype {value} should start with torch."
+        try:
+            value = getattr(torch, value.split(".")[1])
+        except AttributeError as e:
+            raise ValueError(f"unknown dtype: {value}") from e
+    assert isinstance(value, torch.dtype), f"dtype {value} should be torch.dtype, got {type(value)}"
+    return value
 
+
+_TorchDtype = Annotated[
+    torch.dtype,
+    PlainValidator(_dt_validate),
+    PlainSerializer(lambda x: str(x), return_type=str),
+    WithJsonSchema({"type": "string"}, mode="serialization"),
+]
+
+
+def _size_validate(value: Any) -> torch.Size:
+    if isinstance(value, list | tuple):
+        return torch.Size(value)
+    assert isinstance(value, torch.Size), f"size {value} should be torch.Size, got {type(value)}"
+    return value
+
+
+_TorchSize = Annotated[
+    torch.Size,
+    PlainValidator(_size_validate),
+    PlainSerializer(lambda x: tuple(x), return_type=tuple),
+    WithJsonSchema({"type": "array", "items": {"type": "integer"}}, mode="serialization"),
+]
+
+
+class ParameterMeta(BaseModel):
     name: str
-    dtype: torch.dtype
-    shape: torch.Size
+    dtype: _TorchDtype
+    shape: _TorchSize
 
 
 class BucketRange(NamedTuple):

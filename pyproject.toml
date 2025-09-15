@@ -8,12 +8,13 @@ requires-python = ">=3.10"
 dependencies = [
     "torch>=2.5.0",
     "fastapi",
-    "pydantic",
+    "pydantic>=2.0.0",
     "safetensors",
     "pyzmq",
     "uvicorn",
     "loguru",
     "numpy",
+    "requests",
 ]
 
 [project.optional-dependencies]
