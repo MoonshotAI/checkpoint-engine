@@ -1,0 +1,895 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>How Kimi K2 Achieves Efficient RL Parameter Updates</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.2.0/github-markdown-light.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css">
+    <link rel="shortcut icon" href="//statics.moonshot.cn/kimi-web-seo/favicon.ico" />
+    <style>
+        /* CSS Variables for Theme Colors */
+        :root {
+            /* Light theme - Light backgrounds with dark text */
+            --bg-main: #fafafa;
+            --bg-container: #ffffff;
+            --bg-content: #ffffff;
+            --bg-code: #f8f9fa;
+            --bg-code-inline: #f1f3f4;
+            --bg-table-header: #f8f9fa;
+            --bg-table-row: #f8f9fa;
+            --bg-loading: #f8f9fa;
+            --bg-header: linear-gradient(135deg, #2d3748 0%, #4a5568 100%);
+            --text-main: #1a1a1a;
+            --text-link: #1976d2;
+            --text-link-hover: #1565c0;
+            --text-footer: #656d76;
+            --border-light: #e0e0e0;
+            --border-medium: #d0d7de;
+            --border-dark: #e1e4e8;
+            --border-container: #e5e5e5;
+            --shadow-color: rgba(0, 0, 0, 0.08);
+            --loading-text: #4a5568;
+            --loading-spinner-border: #e2e8f0;
+            --loading-spinner-top: #4299e1;
+        }
+        
+        /* Dark theme - Dark backgrounds with light text */
+        body.dark-theme {
+            --bg-main: #1a1a1a;
+            --bg-container: #2d2d2d;
+            --bg-content: #2d2d2d;
+            --bg-code: #404040;
+            --bg-code-inline: #505050;
+            --bg-table-header: #404040;
+            --bg-table-row: #383838;
+            --bg-loading: #2d2d2d;
+            --bg-header: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+            --text-main: #e8e8e8;
+            --text-link: #7ec8ff;
+            --text-link-hover: #a8d8ff;
+            --text-footer: #b0b0b0;
+            --border-light: #555555;
+            --border-medium: #555555;
+            --border-dark: #404040;
+            --border-container: #404040;
+            --shadow-color: rgba(0, 0, 0, 0.6);
+            --loading-text: #b0b0b0;
+            --loading-spinner-border: #666666;
+            --loading-spinner-top: #7ec8ff;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            line-height: 1.7;
+            color: var(--text-main);
+            background-color: var(--bg-main);
+            margin: 0;
+            padding: 0;
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+        
+        .container {
+            max-width: 980px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: var(--bg-container);
+            box-shadow: 0 4px 24px var(--shadow-color);
+            border-radius: 12px;
+            margin-top: 20px;
+            margin-bottom: 20px;
+            border: 1px solid var(--border-container);
+            transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .markdown-body {
+            box-sizing: border-box;
+            min-width: 200px;
+            max-width: 980px;
+            margin: 0 auto;
+            padding: 45px;
+            background-color: var(--bg-content);
+            transition: background-color 0.3s ease;
+        }
+        
+        /* Text colors - follow theme */
+        .markdown-body,
+        .markdown-body * {
+            color: var(--text-main) !important;
+            transition: color 0.3s ease;
+        }
+        
+        .markdown-body a {
+            color: var(--text-link) !important;
+        }
+        
+        .markdown-body a:hover {
+            color: var(--text-link-hover) !important;
+        }
+        
+        .markdown-body h1, .markdown-body h2, .markdown-body h3 {
+            border-bottom: 2px solid var(--border-light);
+            padding-bottom: 0.4em;
+            margin-top: 32px;
+            margin-bottom: 20px;
+            color: var(--text-main);
+            font-weight: 700;
+            transition: border-color 0.3s ease, color 0.3s ease;
+        }
+        
+        .markdown-body h1 {
+            font-size: 2.2em;
+            border-bottom: 3px solid var(--border-light);
+        }
+        
+        .markdown-body h2 {
+            font-size: 1.7em;
+        }
+        
+        .markdown-body h3 {
+            font-size: 1.35em;
+        }
+        
+        .markdown-body p {
+            color: var(--text-main);
+            font-size: 16px;
+            line-height: 1.8;
+            margin-bottom: 16px;
+            font-weight: 400;
+        }
+        
+        /* Table colors - follow theme */
+        .markdown-body table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 16px 0;
+            font-size: 14px;
+            border: 1px solid var(--border-medium);
+        }
+        
+        .markdown-body table th {
+            background-color: var(--bg-table-header) !important;
+            border: 1px solid var(--border-medium);
+            padding: 12px 16px;
+            font-weight: 600;
+            text-align: left;
+            color: var(--text-main) !important;
+            font-size: 15px;
+            transition: background-color 0.3s ease, border-color 0.3s ease;
+        }
+        
+        /* Override GitHub markdown table header styles */
+        .markdown-body table thead tr {
+            background-color: var(--bg-table-header) !important;
+        }
+        
+        .markdown-body table thead th {
+            background-color: var(--bg-table-header) !important;
+        }
+        
+        .markdown-body table td {
+            border: 1px solid var(--border-medium);
+            padding: 12px 16px;
+            color: var(--text-main) !important;
+            font-size: 15px;
+            transition: background-color 0.3s ease, border-color 0.3s ease;
+        }
+        
+        .markdown-body table tr:nth-child(even) {
+            background-color: var(--bg-table-row) !important;
+            transition: background-color 0.3s ease;
+        }
+        
+        /* Ensure all table rows use theme colors */
+        .markdown-body table tr {
+            background-color: transparent;
+        }
+        
+        .markdown-body table tbody tr {
+            background-color: transparent;
+        }
+        
+        /* Override any potential GitHub markdown styles */
+        .markdown-body table tbody tr:nth-child(2n) {
+            background-color: var(--bg-table-row) !important;
+        }
+        
+        /* Additional overrides for GitHub markdown compatibility */
+        .markdown-body table tr:nth-child(2n) {
+            background-color: var(--bg-table-row) !important;
+        }
+        
+        .markdown-body table tbody tr:nth-child(even) {
+            background-color: var(--bg-table-row) !important;
+        }
+        
+        /* Ensure no white backgrounds sneak in */
+        .markdown-body table * {
+            background-color: transparent !important;
+        }
+        
+        .markdown-body table th,
+        .markdown-body table td {
+            background-color: transparent !important;
+        }
+        
+        .markdown-body table thead * {
+            background-color: var(--bg-table-header) !important;
+        }
+        
+        .markdown-body table tbody tr:nth-child(even) * {
+            background-color: var(--bg-table-row) !important;
+        }
+        
+        /* Code colors - follow theme */
+        .markdown-body pre {
+            background-color: var(--bg-code);
+            border-radius: 8px;
+            font-size: 14px;
+            line-height: 1.6;
+            overflow: auto;
+            padding: 20px;
+            border: 1px solid var(--border-medium);
+            color: var(--text-main);
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+            transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+        }
+        
+        .markdown-body code {
+            background-color: var(--bg-code-inline);
+            border-radius: 4px;
+            font-size: 0.9em;
+            margin: 0;
+            padding: 0.2em 0.4em;
+            color: var(--text-main);
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+            border: 1px solid var(--border-light);
+            font-weight: 500;
+            transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+        }
+        
+        .markdown-body pre code {
+            background-color: transparent;
+            border: 0;
+            display: inline;
+            line-height: inherit;
+            margin: 0;
+            max-width: auto;
+            overflow: visible;
+            padding: 0;
+            word-wrap: normal;
+        }
+        
+        /* Other elements */
+        .markdown-body img {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid var(--border-medium);
+            border-radius: 6px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            margin: 16px auto;
+            display: block;
+            transition: border-color 0.3s ease;
+        }
+        
+        /* 图片caption样式 */
+        .markdown-body figure.image-with-caption {
+            display: table;
+            margin: 20px auto;
+            text-align: center;
+            max-width: 100%;
+        }
+        
+        .markdown-body figure.image-with-caption img {
+            display: block;
+            margin: 0 auto 8px auto;
+            box-shadow: 0 4px 12px var(--shadow-color);
+        }
+        
+        .markdown-body figure.image-with-caption figcaption {
+            display: table-caption;
+            caption-side: bottom;
+            font-size: 14px;
+            color: var(--text-footer);
+            text-align: center;
+            margin-top: 8px;
+            padding: 4px 0;
+            transition: all 0.3s ease;
+        }
+        
+        body.dark-theme .markdown-body figure.image-with-caption figcaption {
+            color: var(--text-footer);
+        }
+        
+        /* 特定大小的图片样式 */
+        .markdown-body img.pipeline-image {
+            max-width: 800px;
+            width: 100%;
+        }
+        
+        .markdown-body img.small-image {
+            max-width: 500px;
+            width: 80%;
+        }
+        
+        .header {
+            text-align: center;
+            padding: 30px 20px;
+            background: var(--bg-header);
+            color: white;
+            border-radius: 12px 12px 0 0;
+            margin: -20px -20px 30px -20px;
+            border-bottom: 4px solid #4299e1;
+            position: relative;
+            transition: background 0.3s ease;
+        }
+        
+        body.dark-theme .header {
+            border-bottom-color: #7ec8ff;
+        }
+        
+        .theme-toggle {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(255, 255, 255, 0.2);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50px;
+            padding: 10px 15px;
+            color: white;
+            cursor: pointer;
+            font-size: 16px;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+        }
+        
+        .theme-toggle:hover {
+            background: rgba(255, 255, 255, 0.3);
+            border-color: rgba(255, 255, 255, 0.5);
+            transform: scale(1.05);
+        }
+        
+        .language-toggle {
+            position: absolute;
+            top: 20px;
+            right: 80px;
+            background: rgba(255, 255, 255, 0.2);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50px;
+            padding: 10px 15px;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            font-weight: 600;
+        }
+        
+        .language-toggle:hover {
+            background: rgba(255, 255, 255, 0.3);
+            border-color: rgba(255, 255, 255, 0.5);
+            transform: scale(1.05);
+        }
+        
+        .header-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+            max-width: 100%;
+        }
+        
+        .logo {
+            width: 100%;
+            max-width: 160px;
+            filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+            margin-bottom: 30px;
+            image-rendering: -webkit-optimize-contrast;
+            image-rendering: crisp-edges;
+            image-rendering: high-quality;
+        }
+        
+        .header-titles {
+            text-align: center;
+            min-width: 0;
+            width: 100%;
+        }
+        
+        .header h1 {
+            margin: 0;
+            font-size: 1.8em;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+            line-height: 1.2;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .header p {
+            margin: 5px 0 0 0;
+            font-size: 1em;
+            opacity: 0.95;
+            font-weight: 300;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 80px 50px;
+            font-size: 1.3em;
+            color: var(--loading-text);
+            background-color: var(--bg-loading);
+            border-radius: 8px;
+            margin: 20px 0;
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+        
+        .spinner {
+            border: 4px solid var(--loading-spinner-border);
+            border-top: 4px solid var(--loading-spinner-top);
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 25px auto;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 30px 0;
+            margin-top: 40px;
+            border-top: 1px solid var(--border-dark);
+            color: var(--text-footer);
+            font-size: 14px;
+            transition: border-color 0.3s ease, color 0.3s ease;
+        }
+        
+        .footer a {
+            color: var(--text-link);
+        }
+        
+        @media (max-width: 767px) {
+            .container {
+                margin: 5px;
+                padding: 10px;
+                max-width: 100%;
+                width: calc(100% - 10px);
+                box-sizing: border-box;
+            }
+
+            .markdown-body {
+                padding: 15px;
+                max-width: 100%;
+                box-sizing: border-box;
+            }
+
+            .markdown-body p {
+                word-wrap: break-word;
+                overflow-wrap: break-word;
+                text-align: justify;
+                margin-bottom: 12px;
+                font-size: 15px;
+                line-height: 1.7;
+            }
+
+            .markdown-body h1, .markdown-body h2, .markdown-body h3 {
+                word-wrap: break-word;
+                overflow-wrap: break-word;
+                text-align: left;
+            }
+            
+            .header {
+                margin: -15px -15px 20px -15px;
+                padding: 20px 15px;
+            }
+            
+            .header-content {
+                gap: 15px;
+                padding-top: 50px; /* 为按钮留出空间 */
+            }
+            
+            .logo {
+                width: 100%;
+                max-width: 160px;
+                margin-bottom: 20px;
+            }
+            
+            .header h1 {
+                font-size: 1.3em;
+                white-space: normal;
+                line-height: 1.3;
+                word-wrap: break-word;
+                overflow-wrap: break-word;
+            }
+
+            .header p {
+                font-size: 0.9em;
+                margin: 8px 0 0 0;
+                white-space: normal;
+                line-height: 1.4;
+                word-wrap: break-word;
+                overflow-wrap: break-word;
+            }
+
+            .theme-toggle, .language-toggle {
+                top: 15px;
+                padding: 8px 12px;
+                font-size: 14px;
+            }
+
+            .theme-toggle {
+                right: 15px;
+            }
+
+            .language-toggle {
+                right: 70px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .header h1 {
+                font-size: 1.1em;
+                line-height: 1.2;
+            }
+
+            .header p {
+                font-size: 0.85em;
+            }
+
+            .logo {
+                max-width: 120px;
+            }
+
+            .theme-toggle, .language-toggle {
+                font-size: 12px;
+                padding: 6px 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <button class="theme-toggle" id="themeToggle" title="切换深色/浅色模式">🌑</button>
+            <button class="language-toggle" id="languageToggle" title="切换语言">中文</button>
+            <div class="header-content">
+                <!-- <img src="figures/logo-CvjirWOb.png" alt="Kimi K2 Logo" class="logo"> -->
+                <img src="//statics.moonshot.cn/kimi-blog/assets/logo-CvjirWOb.svg" alt="Moonshot AI" class="logo">
+                <div class="header-titles">
+                    <h1 id="pageTitle">How Kimi K2 Achieves Efficient RL Parameter Updates</h1>
+                    <p id="pageSubtitle">Technical breakthrough from 10 minutes to 20 seconds - Checkpoint Engine high-performance parameter update solution</p>
+                </div>
+            </div>
+        </div>
+        
+        <div id="content">
+            <div class="loading">
+                <div class="spinner"></div>
+                <p id="loadingText">Loading README.md...</p>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p id="footerText">Kimi K2 Technical Sharing - <a href="https://github.com/MoonshotAI/checkpoint-engine" style="color: #0066cc;">Checkpoint Engine</a></p>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/2.4.3/purify.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+    
+    <script>
+        // 简单的语言配置
+        const translations = {
+            en: {
+                title: "How Kimi K2 Achieves Efficient RL Parameter Updates",
+                subtitle: "Technical breakthrough from 10 minutes to 20 seconds - Checkpoint Engine high-performance parameter update solution",
+                loading: "Loading README.md...",
+                errorTitle: "Loading Failed",
+                errorMessage: "Unable to load README.md file",
+                errorCheck: "Please ensure README.md file exists in the same directory.",
+                footer: "Kimi K2 Technical Sharing - ",
+                themeTooltip: "Switch Dark/Light Mode"
+            },
+            zh: {
+                title: "Kimi K2 如何实现高效 RL 参数更新",
+                subtitle: "从10分钟到20秒的技术突破 - Checkpoint Engine 高性能参数更新方案",
+                loading: "正在加载 README.md...",
+                errorTitle: "加载失败",
+                errorMessage: "无法加载 README.md 文件",
+                errorCheck: "请确保 README.md 文件存在于同一目录中。",
+                footer: "Kimi K2 技术分享 - ",
+                themeTooltip: "切换深色/浅色模式"
+            }
+        };
+
+        // 获取当前语言 - 默认英文
+        function getCurrentLanguage() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const urlLang = urlParams.get('lang') || urlParams.get('language');
+            if (urlLang === 'zh' || urlLang === 'en') {
+                return urlLang;
+            }
+            // 默认英文
+            return 'en';
+        }
+
+        let currentLanguage = getCurrentLanguage();
+
+        // 预处理markdown，支持图片caption和自定义样式
+        function preprocessMarkdownForCaptions(markdown) {
+            let processedMarkdown = markdown;
+            
+            // 1. 处理带caption的图片（图片后跟斜体）
+            // ![alt](src) 或 ![alt](src "title") 后跟 *caption* 或 _caption_
+            const imageWithCaptionPattern = /(!\[([^\]]*)\]\(([^)]+)\))\s*\n\s*[*_]\s*([^*_]+)\s*[*_]/g;
+            
+            processedMarkdown = processedMarkdown.replace(imageWithCaptionPattern, (match, imageSyntax, alt, src, caption) => {
+                // 提取src和title（如果存在）
+                const srcParts = src.split(' ');
+                const imageSrc = srcParts[0];
+                const imageTitle = srcParts.length > 1 ? srcParts.slice(1).join(' ').replace(/^["']|["']$/g, '') : '';
+                
+                // 根据图片路径决定样式类
+                let imageClass = '';
+                if (imageSrc.includes('three-stage-pipeline')) {
+                    imageClass = 'pipeline-image';
+                } else if (imageSrc.includes('recover')) {
+                    imageClass = 'small-image';
+                }
+                
+                // 返回figure元素
+                return `<figure class="image-with-caption"><img src="${imageSrc}" alt="${alt}" title="${imageTitle}" loading="lazy" class="${imageClass}"><figcaption>${caption.trim()}</figcaption></figure>`;
+            });
+            
+            // 2. 处理普通图片，添加样式类
+            const normalImagePattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
+            processedMarkdown = processedMarkdown.replace(normalImagePattern, (match, alt, src) => {
+                // 提取src和title（如果存在）
+                const srcParts = src.split(' ');
+                const imageSrc = srcParts[0];
+                const imageTitle = srcParts.length > 1 ? srcParts.slice(1).join(' ').replace(/^["']|["']$/g, '') : '';
+                
+                // 根据图片路径决定样式类
+                let imageClass = '';
+                if (imageSrc.includes('three-stage-pipeline')) {
+                    imageClass = 'pipeline-image';
+                } else if (imageSrc.includes('recover')) {
+                    imageClass = 'small-image';
+                }
+                
+                return `<img src="${imageSrc}" alt="${alt}" title="${imageTitle}" loading="lazy" class="${imageClass}">`;
+            });
+            
+            return processedMarkdown;
+        }
+
+
+        // Configure marked options
+        marked.setOptions({
+            highlight: function(code, lang) {
+                if (lang && hljs.getLanguage(lang)) {
+                    return hljs.highlight(code, { language: lang }).value;
+                }
+                return hljs.highlightAuto(code).value;
+            },
+            breaks: true,
+            gfm: true,
+            headerIds: true,
+            mangle: false,
+            pedantic: false,
+            sanitize: false,
+            smartLists: true,
+            smartypants: true,
+            xhtml: false
+        });
+
+        // 更新UI文本
+        function updateUIText() {
+            const t = translations[currentLanguage];
+            
+            // 安全更新元素，确保元素存在
+            const pageTitle = document.getElementById('pageTitle');
+            const pageSubtitle = document.getElementById('pageSubtitle');
+            const loadingText = document.getElementById('loadingText');
+            const footerText = document.getElementById('footerText');
+            const themeToggle = document.getElementById('themeToggle');
+            const langToggle = document.getElementById('languageToggle');
+            
+            if (pageTitle) pageTitle.textContent = t.title;
+            if (pageSubtitle) pageSubtitle.textContent = t.subtitle;
+            if (loadingText) loadingText.textContent = t.loading;
+            if (footerText) footerText.innerHTML = t.footer + '<a href="https://github.com/MoonshotAI/checkpoint-engine" style="color: #0066cc;">Checkpoint Engine</a>';
+            if (themeToggle) themeToggle.title = t.themeTooltip;
+            
+            // 更新按钮显示对方语言
+            if (langToggle) {
+                if (currentLanguage === 'en') {
+                    langToggle.textContent = '中文';
+                } else {
+                    langToggle.textContent = 'English';
+                }
+            }
+        }
+
+        // 简单的语言切换
+        function switchLanguage() {
+            console.log('切换语言，当前语言:', currentLanguage);
+            
+            // 切换语言
+            currentLanguage = currentLanguage === 'en' ? 'zh' : 'en';
+            console.log('新语言:', currentLanguage);
+            
+            // 更新URL
+            const url = new URL(window.location);
+            url.searchParams.set('lang', currentLanguage);
+            window.history.replaceState({}, '', url);
+            console.log('URL更新为:', url.href);
+            
+            // 更新UI
+            updateUIText();
+            
+            // 重新加载内容
+            console.log('开始重新加载README文件...');
+            loadReadme();
+        }
+        
+        // 加载README
+        async function loadReadme() {
+            console.log('📖 loadReadme() 被调用，当前语言:', currentLanguage);
+            
+            try {
+                const readmeFile = currentLanguage === 'zh' ? 'README_zh.md' : 'README.md';
+                console.log('📖 正在加载文件:', readmeFile);
+                
+                const response = await fetch(readmeFile);
+                console.log('📖 fetch响应状态:', response.status);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const markdown = await response.text();
+                console.log('📖 文件加载成功，长度:', markdown.length);
+                
+                // 预处理markdown，为图片添加caption支持
+                const processedMarkdown = preprocessMarkdownForCaptions(markdown);
+                
+                // 移除第一个H1标题避免重复
+                let html = marked.parse(processedMarkdown);
+                html = html.replace(/^\s*<h1[^>]*>.*?<\/h1>\s*/i, '');
+                console.log('📖 markdown解析完成，HTML长度:', html.length);
+                
+                // 清理HTML
+                const cleanHtml = DOMPurify.sanitize(html, {
+                    ADD_TAGS: ['iframe'],
+                    ADD_ATTR: ['allowfullscreen', 'frameborder', 'scrolling']
+                });
+                console.log('📖 HTML清理完成');
+
+                // 处理链接，添加target="_blank"到外部链接
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = cleanHtml;
+
+                const links = tempDiv.querySelectorAll('a');
+                links.forEach(link => {
+                    const href = link.getAttribute('href');
+                    if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+                        link.setAttribute('target', '_blank');
+                        link.setAttribute('rel', 'noopener noreferrer');
+                    }
+                });
+
+                // 更新内容
+                document.getElementById('content').innerHTML = `
+                    <div class="markdown-body">
+                        ${tempDiv.innerHTML}
+                    </div>
+                `;
+                console.log('✅ 内容更新完成！');
+                
+            } catch (error) {
+                console.error('❌ 加载失败:', error);
+                const t = translations[currentLanguage];
+                document.getElementById('content').innerHTML = `
+                    <div style="text-align: center; padding: 50px; color: #d1242f;">
+                        <h3>${t.errorTitle}</h3>
+                        <p>${t.errorMessage}: ${error.message}</p>
+                        <p>${t.errorCheck}</p>
+                    </div>
+                `;
+            }
+        }
+
+        // 主题切换 - 默认深色
+        const themeToggle = document.getElementById('themeToggle');
+        const body = document.body;
+        
+        // 默认深色模式
+        body.classList.add('dark-theme');
+        themeToggle.textContent = '🌑';
+        
+        // 主题切换
+        themeToggle.addEventListener('click', () => {
+            body.classList.toggle('dark-theme');
+            if (body.classList.contains('dark-theme')) {
+                themeToggle.textContent = '🌑';
+            } else {
+                themeToggle.textContent = '🌕';
+            }
+        });
+        
+        // 语言切换 - 无需刷新页面
+        document.getElementById('languageToggle').addEventListener('click', function() {
+            console.log('🔄 语言切换按钮被点击，当前语言:', currentLanguage);
+            
+            // 切换语言
+            const newLanguage = currentLanguage === 'en' ? 'zh' : 'en';
+            console.log('🔄 准备切换到新语言:', newLanguage);
+            
+            // 更新URL
+            const url = new URL(window.location);
+            url.searchParams.set('lang', newLanguage);
+            window.history.replaceState({}, '', url);
+            console.log('🔄 URL已更新为:', url.href);
+            
+            // 先更新按钮文本
+            const langToggle = document.getElementById('languageToggle');
+            if (langToggle) {
+                langToggle.textContent = newLanguage === 'en' ? '中文' : 'English';
+            }
+            
+            // 显示加载状态
+            const loadingText = newLanguage === 'zh' ? '正在切换语言...' : 'Switching language...';
+            document.getElementById('content').innerHTML = `
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>${loadingText}</p>
+                </div>
+            `;
+            
+            // 更新当前语言变量
+            currentLanguage = newLanguage;
+            
+            // 更新其他UI文本
+            updateUIText();
+            console.log('🔄 UI文本已更新');
+            
+            // 重新加载内容
+            console.log('🔄 开始重新加载README文件:', currentLanguage === 'zh' ? 'README_zh.md' : 'README.md');
+            loadReadme();
+        });
+
+        // 简单的初始化
+        function init() {
+            console.log('=== 页面初始化开始 ===');
+            console.log('当前语言:', currentLanguage);
+            
+            // 初始化UI
+            updateUIText();
+            
+            // 加载内容
+            console.log('开始加载初始内容...');
+            loadReadme();
+            
+            console.log('=== 页面初始化完成 ===');
+        }
+        
+        // 页面加载完成后初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            init();
+        });
+    </script>
+</body>
+</html>
