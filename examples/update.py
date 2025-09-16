@@ -118,13 +118,13 @@ def update_weights(
 def join(
     ps: ParameterServer,
     checkpoint_name: str,
-    save_metas_file: str,
+    load_metas_file: str,
     req_func: Callable[[list[tuple[str, str]]], None],
     inference_parallel_size: int,
     endpoint: str,
 ):
-    assert save_metas_file, "save_metas_file is required"
-    with open(save_metas_file, "rb") as f:
+    assert load_metas_file, "load_metas_file is required"
+    with open(load_metas_file, "rb") as f:
         metas = pickle.load(f)
     ps.init_process_group()
     check_vllm_ready(endpoint, inference_parallel_size)
