@@ -40,12 +40,14 @@ if TYPE_CHECKING:
 
 def _dt_validate(value: Any) -> torch.dtype:
     if isinstance(value, str):
-        assert value.startswith("torch."), f"dtype {value} should start with torch."
+        if not value.startswith("torch."):
+            raise ValueError(f"dtype {value} should start with torch.")
         try:
             value = getattr(torch, value.split(".")[1])
         except AttributeError as e:
             raise ValueError(f"unknown dtype: {value}") from e
-    assert isinstance(value, torch.dtype), f"dtype {value} should be torch.dtype, got {type(value)}"
+    if not isinstance(value, torch.dtype):
+        raise TypeError(f"dtype {value} should be torch.dtype, got {type(value)}")
     return value
 
 
@@ -60,7 +62,8 @@ _TorchDtype = Annotated[
 def _size_validate(value: Any) -> torch.Size:
     if isinstance(value, list | tuple):
         return torch.Size(value)
-    assert isinstance(value, torch.Size), f"size {value} should be torch.Size, got {type(value)}"
+    if not isinstance(value, torch.Size):
+        raise TypeError(f"size {value} should be torch.Size, got {type(value)}")
     return value
 
 
