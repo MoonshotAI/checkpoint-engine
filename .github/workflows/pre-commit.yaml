@@ -2,7 +2,6 @@ name: pre-commit
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 jobs:
@@ -15,7 +14,7 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.x'
-      - name: Install pre-commit
-        run: pip install pre-commit
       - name: Run pre-commit hooks
-        run: pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
+        uses: pre-commit/action@v3.0.1
+        with:
+          extra_args: --all-files
