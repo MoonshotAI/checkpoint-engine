@@ -19,7 +19,8 @@ dependencies = [
 
 [project.optional-dependencies]
 p2p = [
-    "mooncake-transfer-engine",
+    # `batch_register_memory` is introduced in 0.3.5
+    "mooncake-transfer-engine>=0.3.5",
 ]
 
 [build-system]
