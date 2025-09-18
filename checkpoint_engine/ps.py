@@ -19,6 +19,7 @@ import requests
 import torch
 import torch.distributed as dist
 import zmq
+from fastapi.encoders import jsonable_encoder
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, PlainSerializer, PlainValidator, WithJsonSchema
 from safetensors.torch import safe_open
@@ -1113,11 +1114,23 @@ def _init_api(ps: ParameterServer) -> Any:
 
     def wrap_exception(func: Callable[[], None]) -> Response:
         try:
-            func()
+            ret = func()
+            return (
+                Response(status_code=200)
+                if ret is None
+                else JSONResponse(jsonable_encoder(ret), status_code=200)
+            )
         except Exception as e:  # noqa: BLE001
             logger.exception(f"wrap exception {func} failed")
             return JSONResponse(content=str(e), status_code=500)
-        return Response(status_code=200)
+
+    @app.get("/v1/checkpoints/metas")
+    async def get_metas() -> Response:
+        return wrap_exception(lambda: ps.get_metas())
+
+    @app.post("/v1/checkpoints/metas")
+    async def load_metas(req: dict[int, MemoryBufferMetaList]) -> Response:
+        return wrap_exception(lambda: ps.load_metas(req))
 
     @app.post("/v1/checkpoints/{checkpoint_name}/files")
     async def register_files(checkpoint_name: str, req: RegisterRequest, raw: Request) -> Response:
