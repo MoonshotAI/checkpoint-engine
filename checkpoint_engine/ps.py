@@ -963,6 +963,7 @@ class ParameterServer:
         )
         req_thread.start()
         socket.send_pyobj(handle)
+        last_owner_rank = self._rank
         for gidx, (owner_rank, bucket) in enumerate(buckets):
             self._logger_rank0(
                 f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} owner_rank {owner_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
@@ -972,11 +973,15 @@ class ParameterServer:
                 self._copy_to_buffer(checkpoint_name, bucket, _buffer, owner_rank)
             # broadcast the collected data to all ranks
             dist.broadcast(_buffer, src=0)
-            socket.recv()
+            if last_owner_rank == self._rank:
+                socket.recv()
             dist.barrier()
-            socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
+            if last_owner_rank == self._rank:
+                socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
+            last_owner_rank = owner_rank
 
-        socket.recv()
+        if last_owner_rank == self._rank:
+            socket.recv()
         socket.send_pyobj(None)
         socket.recv()
         req_thread.join()
