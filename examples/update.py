@@ -8,7 +8,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Literal
 
-import requests
+import httpx
 import torch
 import torch.distributed as dist
 from loguru import logger
@@ -25,16 +25,19 @@ def timer(msg: str):
     logger.info(f"{msg} duration: {end - start:.2f} seconds")
 
 
-def check_vllm_ready(endpoint: str, inference_parallel_size: int):
+def check_vllm_ready(endpoint: str, inference_parallel_size: int, uds: str | None = None):
     if rank != rank // inference_parallel_size * inference_parallel_size:
         return
     retry_num = 0
+    transport = None
+    if uds is not None:
+        transport = httpx.HTTPTransport(uds=uds)
     while True:
         try:
-            response = requests.get(f"{endpoint}/health", timeout=10)
+            response = httpx.Client(transport=transport).get(f"{endpoint}/health", timeout=10)
             response.raise_for_status()
             break
-        except requests.exceptions.RequestException as e:
+        except (httpx.ConnectError, httpx.HTTPStatusError) as e:
             retry_num += 1
             logger.warning(f"fail to check vllm ready, retry {retry_num} times, error: {e}")
             time.sleep(5)
@@ -67,7 +70,9 @@ def split_tensors(checkpoint_path: str, rank: int, world_size: int) -> dict[str,
 
 
 def req_inference(
-    endpoint: str, inference_parallel_size: int
+    endpoint: str,
+    inference_parallel_size: int,
+    uds: str | None = None,
 ) -> Callable[[list[tuple[str, str]]], None]:
     rank = int(os.getenv("RANK", None))
     src = rank // inference_parallel_size * inference_parallel_size
@@ -77,6 +82,7 @@ def req_inference(
             request_inference_to_update(
                 f"{endpoint}/collective_rpc",
                 dict(socket_paths[src : src + inference_parallel_size]),
+                uds=uds,
             )
 
     return req_func
@@ -92,10 +98,11 @@ def update_weights(
     endpoint: str,
     save_metas_file: str | None = None,
     update_method: Literal["broadcast", "p2p", "all"] = "broadcast",
+    uds: str | None = None,
 ):
     ps.register_checkpoint(checkpoint_name, files=checkpoint_files, named_tensors=named_tensors)
     ps.init_process_group()
-    check_vllm_ready(endpoint, inference_parallel_size)
+    check_vllm_ready(endpoint, inference_parallel_size, uds)
     dist.barrier()
     with timer("Gather metas"):
         ps.gather_metas(checkpoint_name)
@@ -122,12 +129,13 @@ def join(
     req_func: Callable[[list[tuple[str, str]]], None],
     inference_parallel_size: int,
     endpoint: str,
+    uds: str | None = None,
 ):
     assert load_metas_file, "load_metas_file is required"
     with open(load_metas_file, "rb") as f:
         metas = pickle.load(f)
     ps.init_process_group()
-    check_vllm_ready(endpoint, inference_parallel_size)
+    check_vllm_ready(endpoint, inference_parallel_size, uds)
     dist.barrier()
     with timer("Gather metas before join"):
         ps.gather_metas(checkpoint_name)
@@ -148,10 +156,11 @@ if __name__ == "__main__":
     parser.add_argument("--inference-parallel-size", type=int, default=8)
     parser.add_argument("--checkpoint-name", type=str, default="my-checkpoint-iter-0")
     parser.add_argument("--update-method", type=str, default="broadcast")
+    parser.add_argument("--uds", type=str, default=None)
     args = parser.parse_args()
     rank = int(os.getenv("RANK"))
     world_size = int(os.getenv("WORLD_SIZE"))
-    req_func = req_inference(args.endpoint, args.inference_parallel_size)
+    req_func = req_inference(args.endpoint, args.inference_parallel_size, args.uds)
     ps = ParameterServer(auto_pg=True)
     if args.load_metas_file:
         join(
@@ -161,6 +170,7 @@ if __name__ == "__main__":
             req_func,
             args.inference_parallel_size,
             args.endpoint,
+            args.uds,
         )
     else:
         if os.path.exists(os.path.join(args.checkpoint_path, "model.safetensors.index.json")):
@@ -179,5 +189,6 @@ if __name__ == "__main__":
             args.endpoint,
             args.save_metas_file,
             args.update_method,
+            args.uds,
         )
     time.sleep(args.sleep_time)

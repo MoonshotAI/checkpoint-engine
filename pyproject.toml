@@ -14,7 +14,7 @@ dependencies = [
     "uvicorn",
     "loguru",
     "numpy",
-    "requests",
+    "httpx",
 ]
 
 [project.optional-dependencies]

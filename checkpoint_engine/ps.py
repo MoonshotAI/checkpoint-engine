@@ -14,8 +14,8 @@ from datetime import timedelta
 from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, NamedTuple
 
+import httpx
 import numpy as np
-import requests
 import torch
 import torch.distributed as dist
 import zmq
@@ -458,9 +458,25 @@ def _register_checkpoint(
 
 
 def request_inference_to_update(
-    url: str, socket_paths: dict[str, str], timeout: float = 300.0
-) -> None:
-    resp = requests.post(
+    url: str,
+    socket_paths: dict[str, str],
+    timeout: float = 300.0,
+    uds: str | None = None,
+):
+    """Send an inference update request to inference server via HTTP or Unix socket.
+
+    Args:
+        url (str): The HTTP URL or request path (e.g., "http://localhost:19730/inference") to send the request to.
+        socket_paths (dict[str, str]): A dictionary containing device uuid and IPC socket paths for updating weights.
+        timeout (float, optional): Request timeout in seconds. Defaults to 300.0.
+        uds (str, optional): Path to a Unix domain socket. If provided, the request
+            will be sent via the Unix socket instead of HTTP. Defaults to None.
+
+    Raises:
+        httpx.HTTPStatusError: If the response contains an HTTP error status.
+        httpx.RequestError: If there was an issue while making the request.
+    """
+    resp = httpx.Client(transport=httpx.HTTPTransport(uds=uds)).post(
         url,
         json={
             "method": "update_weights_from_ipc",
