@@ -7,7 +7,6 @@ import os
 import pickle
 import random
 import socket
-import subprocess
 import threading
 import time
 from collections import defaultdict
@@ -243,16 +242,11 @@ def _concat_tp_weights(
     return torch.cat([w for w in tp_weights], dim=tp_concat_dim)
 
 
-def _get_physical_gpu_id(rank: int) -> str:
-    result = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True)  # noqa: S607
-    if result.returncode != 0:
-        raise ValueError(result.stdout)
-    lines = result.stdout.strip().split("\n")
-    for line in lines:
-        if f"GPU {rank}" in line:
-            uuid = line.split("UUID: ")[1].strip(")")
-            return uuid
-    raise ValueError(f"not found gpu{rank} uuid")
+def _get_physical_gpu_id(device_index: int | None = None) -> str:
+    try:
+        return f"GPU-{torch.cuda.get_device_properties(device_index).uuid!s}"
+    except AssertionError as e:
+        raise ValueError(f"fail to get physical gpu id {device_index}") from e
 
 
 @lru_cache(maxsize=1)
@@ -613,7 +607,6 @@ class ParameterServer:
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
 
-        self._device_uuid = _get_physical_gpu_id(self._local_rank)
         self._zmq_ctx = zmq.Context()
         self._zmq_addr_counter = 0
 
@@ -626,7 +619,9 @@ class ParameterServer:
             logger.warning(f"[rank{self._rank}] fail to initialize p2p store due to {e}")
             self._p2p_store = None
 
-        torch.cuda.set_device(self._local_rank)
+        device_index = self._local_rank
+        torch.cuda.set_device(device_index)
+        self._device_uuid = _get_physical_gpu_id(device_index)
 
     def _logger_rank0(self, msg: str):
         if self._local_rank == 0:
