@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 import zmq
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, PlainSerializer, PlainValidator, WithJsonSchema
+from pydantic import BaseModel, PlainSerializer, PlainValidator, WithJsonSchema
 from safetensors.torch import safe_open
 from torch.multiprocessing.reductions import reduce_tensor
 
@@ -75,6 +75,18 @@ _TorchSize = Annotated[
 ]
 
 
+def _tensor_validate(value: Any) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value
+    raise TypeError(f"tensor {value} should be torch.Tensor, got {type(value)}")
+
+
+_TorchTensor = Annotated[
+    torch.Tensor,
+    PlainValidator(_tensor_validate),
+]
+
+
 class ParameterMeta(BaseModel):
     name: str
     dtype: _TorchDtype
@@ -100,9 +112,7 @@ class MemoryBufferMetas(BaseModel):
 
 
 class MemoryBuffer(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    buffer: torch.Tensor
+    buffer: _TorchTensor
     size: int
     metas: list[ParameterMeta]
 
