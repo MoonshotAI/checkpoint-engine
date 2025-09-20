@@ -590,7 +590,9 @@ class P2PStore:
 
 
 class ParameterServer:
-    def __init__(self, *, auto_pg: bool = False):
+    def __init__(
+        self, *, rank: int | None = None, world_size: int | None = None, auto_pg: bool = False
+    ):
         """
         Initialize the parameter server. env RANK, WORLD_SIZE and MASTER_ADDR must be set.
 
@@ -598,9 +600,8 @@ class ParameterServer:
             auto_pg: Whether to automatically initialize the process group.
                 Notice that if auto_pg is True, will destroy the process group after update.
         """
-        self._rank = int(os.environ.get("RANK", None))
-        self._world_size = int(os.environ.get("WORLD_SIZE", None))
-        self._master_addr = os.getenv("MASTER_ADDR")
+        self._rank = rank or int(os.environ.get("RANK", None))
+        self._world_size = world_size or int(os.environ.get("WORLD_SIZE", None))
         self._gpu_count = torch.cuda.device_count()
         self._local_rank = self._rank % self._gpu_count
         self._auto_pg = auto_pg
@@ -733,7 +734,11 @@ class ParameterServer:
         )
 
     def init_process_group(
-        self, *, master_port: int | None = None, timeout: timedelta = timedelta(minutes=10)
+        self,
+        *,
+        master_addr: str | None = None,
+        master_port: int | None = None,
+        timeout: timedelta = timedelta(minutes=10),
     ):
         """
         Initialize the process group for the ranks. This global group can be easily destroyed by calling dist.destroy_process_group.
@@ -742,8 +747,10 @@ class ParameterServer:
             master_port: The specified port of the master node. If not set, will use _get_master_port to get the port.
             timeout: The timeout of the process group.
         """
+        master_addr = master_addr or os.getenv("MASTER_ADDR")
+        assert master_addr, "master_addr is required"
         store = dist.TCPStore(
-            self._master_addr,
+            master_addr,
             _get_master_port(master_port),
             self._world_size,
             timeout=timeout,
