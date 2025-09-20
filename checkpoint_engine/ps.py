@@ -303,9 +303,7 @@ def _get_rdma_devices() -> list[str]:
             return hca_list
         else:
             hca = hca_list[0]
-    return [
-        device for device in sorted(_ibv_get_device_list()) if hca is not None and hca in device
-    ]
+    return [device for device in sorted(_ibv_get_device_list()) if hca is None or hca in device]
 
 
 def _get_my_rdma_device(local_rank: int, gpu_count: int, devices: list[str]) -> str:
