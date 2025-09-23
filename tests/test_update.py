@@ -8,7 +8,7 @@ from torch.multiprocessing import Queue, get_context
 
 from checkpoint_engine.ps import ParameterServer, _get_physical_gpu_id
 from checkpoint_engine.worker import update_weights_from_ipc
-
+from loguru import logger
 
 def gen_test_tensors(rank: int) -> list[tuple[str, torch.Tensor]]:
     tensors = []
@@ -78,6 +78,7 @@ def run():
     ps.gather_metas(checkpoint_name)
     ranks_list = [[], list(range(world_size // 2)), [], list(range(world_size))]
     for ranks in ranks_list:
+        logger.warning(f"Update with ranks: {ranks}")
         ps.update(checkpoint_name, queue.put, ranks=ranks)
         # sleep 3s to wait process group is destroyed
         time.sleep(3)

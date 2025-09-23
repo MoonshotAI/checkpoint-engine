@@ -493,8 +493,8 @@ def request_inference_to_update(
 
 
 def _gen_h2d_buckets(
-    global_metas: dict[int, MemoryBufferMetaList], bucket_size: int
-) -> list[tuple[int, H2DBucket]]:
+    global_metas: dict[int, MemoryBufferMetaList], bucket_size: int, ranks: list[int] | None = None
+) -> list[tuple[int, int, H2DBucket]]:
     buckets: list[tuple[int, H2DBucket]] = []
 
     for owner_rank, items in global_metas.items():
@@ -517,7 +517,16 @@ def _gen_h2d_buckets(
         assert buckets[-1][1].size > 0, (
             f"buckets[-1][1].size {buckets[-1][1].size} should be greater than 0"
         )
-    return buckets
+    new_buckets: list[tuple[int, int, H2DBucket]] = []
+    #  (owner_rank, bucket) -> (receiver_rank, owner_rank, bucket)
+    for i, (owner_rank, bucket) in enumerate(buckets):
+        if ranks and owner_rank not in ranks:
+            new_buckets.append((ranks[0], owner_rank, bucket))
+            logger.warning(f"[rank{dist.get_rank()}] bucket {i} owner_rank {owner_rank} not in ranks {ranks}, assign to {new_buckets[-1][0]}")
+        else:
+            new_buckets.append((owner_rank, owner_rank, bucket))
+
+    return new_buckets
 
 
 def _get_master_port(master_port: int | None = None) -> int:
@@ -803,7 +812,7 @@ class ParameterServer:
                         # HACK: wait 2s to ensure destroy is finished
                         time.sleep(2)
                     self.init_process_group_for_ranks(ranks)
-                self._update_per_bucket_p2p(checkpoint_name, req_func, ranks)
+                self._update_per_bucket(checkpoint_name, req_func, ranks)
             if self._auto_pg:
                 dist.destroy_process_group()
 
@@ -948,71 +957,6 @@ class ParameterServer:
             backend="nccl", world_size=len(ranks), rank=rank, timeout=timeout, store=store
         )
 
-    def _update_per_bucket_p2p(
-        self,
-        checkpoint_name: str,
-        req_func: Callable[[list[tuple[str, str]]], None],
-        ranks: list[int],
-    ):
-        assert self._p2p_store is not None, "p2p store is not initialized"
-        assert ranks, "ranks should be set"
-        if len(self._current_global_parameter_metas) == 0:
-            raise ValueError("parameter metas is empty")
-        assert dist.is_initialized(), (
-            "process group is not initialized when update model per bucket p2p"
-        )
-
-        need_update = self._rank in ranks
-        logger.info(
-            f"[rank{self._rank}] update checkpoint {checkpoint_name} p2p, {need_update=} with {ranks=}, "
-            f"gpu_count {self._gpu_count}, world_size {self._world_size}"
-        )
-
-        if not need_update:
-            return
-
-        # first execute a barrier to avoid subsequent cuda oom
-        dist.barrier()
-
-        bucket_size, _ = self._detect_bucket_size(disable_h2d_buffer=True)
-        buffer = torch.empty(bucket_size * 2, dtype=torch.uint8, device="cuda")
-        ipc_buffer_name = "__ipc_buffer___"
-        self._p2p_store.register_named_tensors({ipc_buffer_name: buffer})
-        logger.info(
-            f"[rank{self._rank}] register buffer, shape={buffer.shape}, dtype={buffer.dtype}, data_ptr={buffer.data_ptr()}, nbytes={buffer.nbytes}"
-        )
-        handle = reduce_tensor(buffer)
-
-        buckets = _gen_h2d_buckets(self._current_global_parameter_metas, bucket_size)
-        socket, socket_paths = self._bind_zmq_socket()
-        req_thread = threading.Thread(
-            target=req_func,
-            args=(socket_paths,),
-        )
-        req_thread.start()
-        socket.send_pyobj(handle)
-        for gidx, (owner_rank, bucket) in enumerate(buckets):
-            self._logger_rank0(
-                f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} owner_rank {owner_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
-            )
-            _buffer = buffer[gidx % 2 * bucket_size : gidx % 2 * bucket_size + bucket.size]
-            if dist.get_rank() == 0:
-                self._copy_to_buffer(checkpoint_name, bucket, _buffer, owner_rank)
-            # broadcast the collected data to all ranks
-            dist.broadcast(_buffer, src=0)
-            socket.recv()
-            dist.barrier()
-            socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
-
-        socket.recv()
-        socket.send_pyobj(None)
-        socket.recv()
-        req_thread.join()
-        dist.barrier()
-        socket.close()
-        self._p2p_store.unregister_named_tensors([ipc_buffer_name])
-        torch.cuda.empty_cache()
-
     def _get_addr_ptrs(self, owner_rank: int) -> tuple[str, list[tuple[int, int]]]:
         addr = self._current_global_parameter_metas[owner_rank].p2p_store_addr
         metas_list = self._current_global_parameter_metas[owner_rank].memory_buffer_metas_list
@@ -1042,38 +986,67 @@ class ParameterServer:
         self,
         checkpoint_name: str,
         req_func: Callable[[list[tuple[str, str]]], None],
+        ranks: list[int] | None = None,
     ):
-        if len(self._current_global_parameter_metas) == 0:
-            raise ValueError("parameter metas is empty")
+        logger.warning(f"[rank{self._rank}] Using _update_per_bucket, which is an experimental feature.")
+        assert req_func is not None
+        # if both ranks is None or [], it will use fully broadcast to update to all ranks
+        if not ranks: 
+            if len(self._current_global_parameter_metas) == 0:
+                raise ValueError("parameter metas is empty")
 
-        assert dist.is_initialized(), "process group is not initialized"
+            assert dist.is_initialized(), "process group is not initialized"
 
-        logger.info(f"[rank{self._rank}] update checkpoint {checkpoint_name}")
+            logger.info(f"[rank{self._rank}] update checkpoint {checkpoint_name}")
+        # if ranks is set, it will use p2p to update to the ranks
+        else:
+            assert self._p2p_store is not None, "p2p store is not initialized"
+            assert ranks, "ranks should be set"
+            if len(self._current_global_parameter_metas) == 0:
+                raise ValueError("parameter metas is empty")
+            assert dist.is_initialized(), (
+                "process group is not initialized when update model per bucket p2p"
+            )
+
+            need_update = self._rank in ranks
+            logger.info(
+                f"[rank{self._rank}] update checkpoint {checkpoint_name} p2p, {need_update=} with {ranks=}, "
+                f"gpu_count {self._gpu_count}, world_size {self._world_size}"
+            )
+
+            if not need_update:
+                return
+            # first execute a barrier to avoid subsequent cuda oom
+            dist.barrier()
 
         bucket_size, disable_h2d_buffer = self._detect_bucket_size()
-        buckets = _gen_h2d_buckets(self._current_global_parameter_metas, bucket_size)
+        buckets = _gen_h2d_buckets(self._current_global_parameter_metas, bucket_size, ranks)
 
         h2d_buffer: torch.Tensor | None = (
             None
             if disable_h2d_buffer
             else torch.empty(bucket_size, dtype=torch.uint8, device="cuda")
         )
+        # p2p store need to register h2d_buffer to let other ranks read
+        if ranks:
+            h2d_buffer_name = "__h2d_buffer__"
+            self._p2p_store.register_named_tensors({h2d_buffer_name: h2d_buffer}) if h2d_buffer is not None else None
 
-        owner_rank_buckets: list[H2DBucket] = []
-        for owner_rank, bucket in buckets:
-            if owner_rank != self._rank:
+        receiver_rank_buckets: list[tuple[int, H2DBucket]] = []
+        for receiver_rank, owner_rank, bucket in buckets:
+            if receiver_rank != self._rank:
                 continue
-            owner_rank_buckets.append(bucket)
+            receiver_rank_buckets.append((owner_rank, bucket))
 
         buffer = torch.empty(bucket_size * 2, dtype=torch.uint8, device="cuda")
         handle = reduce_tensor(buffer)
 
-        buckets_by_owner_rank: dict[int, list[H2DBucket]] = defaultdict(list)
+        buckets_by_receiver_rank: dict[int, list[H2DBucket]] = defaultdict(list)
         max_len = 0
-        for owner_rank, bucket in buckets:
-            buckets_by_owner_rank[owner_rank].append(bucket)
-            if len(buckets_by_owner_rank[owner_rank]) > max_len:
-                max_len = len(buckets_by_owner_rank[owner_rank])
+        for receiver_rank, owner_rank, bucket in buckets:
+            buckets_by_receiver_rank[receiver_rank].append(bucket)
+            if len(buckets_by_receiver_rank[receiver_rank]) > max_len:
+                max_len = len(buckets_by_receiver_rank[receiver_rank])
 
         socket, socket_paths = self._bind_zmq_socket()
         req_thread = threading.Thread(
@@ -1085,10 +1058,13 @@ class ParameterServer:
 
         gidx = 0
         for i in range(max_len):
-            if i < len(owner_rank_buckets) and not disable_h2d_buffer:
-                self._copy_to_buffer(checkpoint_name, owner_rank_buckets[i], h2d_buffer)
+            if i < len(receiver_rank_buckets) and not disable_h2d_buffer:
+                if not ranks:
+                    self._copy_to_buffer(checkpoint_name, receiver_rank_buckets[i][1], h2d_buffer)
+                else:
+                    self._copy_to_buffer(checkpoint_name, receiver_rank_buckets[i][1], h2d_buffer, receiver_rank_buckets[i][0])
 
-            for owner_rank, _buckets in buckets_by_owner_rank.items():
+            for receiver_rank, _buckets in buckets_by_receiver_rank.items():
                 if i >= len(_buckets):
                     continue
                 bucket = _buckets[i]
@@ -1097,18 +1073,18 @@ class ParameterServer:
                     torch.cuda.memory_reserved() / 1024 / 1024,
                 )
                 self._logger_rank0(
-                    f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} owner_rank {owner_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
+                    f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} receiver_rank {receiver_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
                     f"Current CUDA allocated {alloc:.2f} MB, "
                     f"reserved {reserved:.2f} MB."
                 )
                 start = gidx % 2 * bucket_size
                 buffer_b: torch.Tensor = buffer[start : start + bucket.size]
-                if owner_rank == self._rank:
+                if receiver_rank == self._rank:
                     if disable_h2d_buffer:
                         self._copy_to_buffer(checkpoint_name, bucket, buffer_b)
                     else:
                         buffer_b.data.copy_(h2d_buffer[: bucket.size])
-                dist.broadcast(buffer_b, src=owner_rank)
+                dist.broadcast(buffer_b, src=receiver_rank)
                 socket.recv()
                 dist.barrier()
                 socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
