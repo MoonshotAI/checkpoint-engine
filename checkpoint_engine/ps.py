@@ -804,14 +804,14 @@ class ParameterServer:
                     self.init_process_group()
                 self._update_per_bucket(checkpoint_name, req_func)
             else:
-                if self._rank not in ranks:
-                    return
                 if self._auto_pg:
                     if dist.is_initialized():
                         dist.destroy_process_group()
                         # HACK: wait 2s to ensure destroy is finished
                         time.sleep(2)
                     self.init_process_group_for_ranks(ranks)
+                if self._rank not in ranks:
+                    return
                 self._update_per_bucket(checkpoint_name, req_func, ranks)
             if self._auto_pg:
                 dist.destroy_process_group()
