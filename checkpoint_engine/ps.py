@@ -517,16 +517,33 @@ def _gen_h2d_buckets(
         assert buckets[-1][1].size > 0, (
             f"buckets[-1][1].size {buckets[-1][1].size} should be greater than 0"
         )
-    new_buckets: list[tuple[int, int, H2DBucket]] = []
-    #  (owner_rank, bucket) -> (receiver_rank, owner_rank, bucket)
+    buckets_with_receiver = _assign_receiver_ranks(buckets, ranks or list(range(len(global_metas))))
+    return buckets_with_receiver
+
+
+def _assign_receiver_ranks(
+    buckets: list[tuple[int, H2DBucket]], ranks: list[int]
+) -> list[tuple[int, int, H2DBucket]]:
+    """
+    (owner_rank, bucket) -> (receiver_rank, owner_rank, bucket)
+
+    Assign receiver ranks to buckets. If ranks is empty, assign the owner_rank as receiver_rank.
+    GPU-NIC topology will be considered to make full use of the bandwidth in the future.
+    Now, if owner_rank is not in ranks, assign the bucket to the first rank in ranks.
+    Assign owner_rank as receiver_rank if ranks is empty or contains only the owner_rank, ignoring the topology.
+    """
+    buckets_with_receiver: list[tuple[int, int, H2DBucket]] = []
+    # TODO: this is a simple implementation, we simply assign the bucket to the first rank in ranks
+    # which may cause imbalance if ranks is not balanced. We can improve this by detecting topology.
     for i, (owner_rank, bucket) in enumerate(buckets):
         if ranks and owner_rank not in ranks:
-            new_buckets.append((ranks[0], owner_rank, bucket))
-            logger.warning(f"[rank{dist.get_rank()}] bucket {i} owner_rank {owner_rank} not in ranks {ranks}, assign to {new_buckets[-1][0]}")
+            buckets_with_receiver.append((ranks[0], owner_rank, bucket))
+            logger.warning(
+                f"[rank{dist.get_rank()}] bucket {i} owner_rank {owner_rank} not in ranks {ranks}, assign to {buckets_with_receiver[-1][0]}"
+            )
         else:
-            new_buckets.append((owner_rank, owner_rank, bucket))
-
-    return new_buckets
+            buckets_with_receiver.append((owner_rank, owner_rank, bucket))
+    return buckets_with_receiver
 
 
 def _get_master_port(master_port: int | None = None) -> int:
@@ -982,6 +999,17 @@ class ParameterServer:
             [f"memory_pool_{checkpoint_name}_{idx}" for idx, _ in enumerate(pool)]
         )
 
+    def _get_bcast_rank_map(self, ranks: list[int]) -> dict[int, int]:
+        # map rank to the rank which is in the same machine and has local_rank 0
+        bcast_rank_map = {}
+        if not ranks:
+            for r in range(self._world_size):
+                bcast_rank_map[r] = r
+        else:
+            for i, r in enumerate(ranks):
+                bcast_rank_map[r] = i
+        return bcast_rank_map
+
     def _update_per_bucket(
         self,
         checkpoint_name: str,
@@ -991,7 +1019,7 @@ class ParameterServer:
         logger.warning(f"[rank{self._rank}] Using _update_per_bucket, which is an experimental feature.")
         assert req_func is not None
         # if both ranks is None or [], it will use fully broadcast to update to all ranks
-        if not ranks: 
+        if not ranks:
             if len(self._current_global_parameter_metas) == 0:
                 raise ValueError("parameter metas is empty")
 
@@ -1030,7 +1058,9 @@ class ParameterServer:
         # p2p store need to register h2d_buffer to let other ranks read
         if ranks:
             h2d_buffer_name = "__h2d_buffer__"
-            self._p2p_store.register_named_tensors({h2d_buffer_name: h2d_buffer}) if h2d_buffer is not None else None
+            self._p2p_store.register_named_tensors(
+                {h2d_buffer_name: h2d_buffer}
+            ) if h2d_buffer is not None else None
 
         receiver_rank_buckets: list[tuple[int, H2DBucket]] = []
         for receiver_rank, owner_rank, bucket in buckets:
@@ -1043,7 +1073,7 @@ class ParameterServer:
 
         buckets_by_receiver_rank: dict[int, list[H2DBucket]] = defaultdict(list)
         max_len = 0
-        for receiver_rank, owner_rank, bucket in buckets:
+        for receiver_rank, _, bucket in buckets:
             buckets_by_receiver_rank[receiver_rank].append(bucket)
             if len(buckets_by_receiver_rank[receiver_rank]) > max_len:
                 max_len = len(buckets_by_receiver_rank[receiver_rank])
@@ -1062,7 +1092,12 @@ class ParameterServer:
                 if not ranks:
                     self._copy_to_buffer(checkpoint_name, receiver_rank_buckets[i][1], h2d_buffer)
                 else:
-                    self._copy_to_buffer(checkpoint_name, receiver_rank_buckets[i][1], h2d_buffer, receiver_rank_buckets[i][0])
+                    self._copy_to_buffer(
+                        checkpoint_name,
+                        receiver_rank_buckets[i][1],
+                        h2d_buffer,
+                        receiver_rank_buckets[i][0],
+                    )
 
             for receiver_rank, _buckets in buckets_by_receiver_rank.items():
                 if i >= len(_buckets):
@@ -1084,7 +1119,8 @@ class ParameterServer:
                         self._copy_to_buffer(checkpoint_name, bucket, buffer_b)
                     else:
                         buffer_b.data.copy_(h2d_buffer[: bucket.size])
-                dist.broadcast(buffer_b, src=receiver_rank)
+                brank = self._get_bcast_rank_map(ranks)[receiver_rank]
+                dist.broadcast(buffer_b, src=brank)
                 socket.recv()
                 dist.barrier()
                 socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
@@ -1096,6 +1132,9 @@ class ParameterServer:
         req_thread.join()
         dist.barrier()
         socket.close()
+        if ranks and h2d_buffer is not None:
+            self._p2p_store.unregister_named_tensors([h2d_buffer_name])
+
         torch.cuda.empty_cache()
 
 
