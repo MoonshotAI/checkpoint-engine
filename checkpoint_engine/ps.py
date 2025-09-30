@@ -148,8 +148,8 @@ def _to_named_tensor(metas: list[ParameterMeta], offset: int = 0) -> list[dict]:
     return ret
 
 
-def _load_checkpoint_file(file_path: str) -> tuple[int, dict[str, tuple['FileMeta', torch.Tensor]]]:
-    def _safetensors_load(fn: str) -> dict[str, tuple['FileMeta', torch.Tensor]]:
+def _load_checkpoint_file(file_path: str) -> tuple[int, dict[str, tuple["FileMeta", torch.Tensor]]]:
+    def _safetensors_load(fn: str) -> dict[str, tuple["FileMeta", torch.Tensor]]:
         ret = {}
         with safe_open(fn, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
@@ -165,7 +165,7 @@ def _load_checkpoint_file(file_path: str) -> tuple[int, dict[str, tuple['FileMet
         return ret
 
     # deprecated, will be removed in the future
-    def _fast_np_load(fn: str) -> dict[str, tuple['FileMeta', torch.Tensor]]:
+    def _fast_np_load(fn: str) -> dict[str, tuple["FileMeta", torch.Tensor]]:
         """load *.np file and return memmap and related tensor meta"""
 
         def parse_npy_header(fin: BinaryIO) -> dict[str, Any]:
