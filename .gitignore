@@ -8,8 +8,6 @@
 .ruff_cache
 .DS_Store
 .idea
-.vscode/
 build/
 dist/
 _version.py
-*_perf/
