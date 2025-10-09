@@ -1063,7 +1063,9 @@ class ParameterServer:
         req_func: Callable[[list[tuple[str, str]]], None],
         ranks: list[int] | None = None,
     ):
-        logger.warning(f"[rank{self._rank}] Using _update_per_bucket, which is an experimental feature.")
+        logger.warning(
+            f"[rank{self._rank}] Using _update_per_bucket, which is an experimental feature."
+        )
         assert req_func is not None
         # if both ranks is None or [], it will use fully broadcast to update to all ranks
         if not ranks:
