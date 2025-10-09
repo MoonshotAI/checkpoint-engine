@@ -122,6 +122,7 @@ class MemoryBufferMetaList(BaseModel):
 class DataToGather(MemoryBufferMetaList):
     host_ip: str
     device_uuid: str
+    rdma_device: str
 
 
 # 256 bytes alignment when flatten torch tensors to uint8 buffer
@@ -490,8 +491,12 @@ def request_inference_to_update(
 
 
 def _gen_h2d_buckets(
-    global_metas: dict[int, MemoryBufferMetaList], bucket_size: int
-) -> list[tuple[int, H2DBucket]]:
+    global_metas: dict[int, MemoryBufferMetaList],
+    bucket_size: int,
+    local_topo: dict[str, set[int]],
+    remote_topo: dict[str, set[int]],
+    ranks: list[int] | None = None,
+) -> list[tuple[int, int, H2DBucket]]:
     buckets: list[tuple[int, H2DBucket]] = []
 
     for owner_rank, items in global_metas.items():
@@ -514,7 +519,62 @@ def _gen_h2d_buckets(
         assert buckets[-1][1].size > 0, (
             f"buckets[-1][1].size {buckets[-1][1].size} should be greater than 0"
         )
-    return buckets
+    actual_local_topo = (
+        {k: v & set(ranks) for k, v in local_topo.items() if v & set(ranks)}
+        if ranks
+        else local_topo
+    )
+    buckets_with_receiver = _assign_receiver_ranks(buckets, actual_local_topo, remote_topo, ranks)
+    return buckets_with_receiver
+
+
+def _assign_receiver_ranks(
+    buckets: list[tuple[int, H2DBucket]],
+    local_topo: dict[str, set[int]],
+    remote_topo: dict[str, set[int]],
+    ranks: list[int] | None = None,
+) -> list[tuple[int, int, H2DBucket]]:
+    """
+    (owner_rank, bucket) -> (receiver_rank, owner_rank, bucket)
+
+    Assign receiver ranks to buckets. If ranks is empty, assign the owner_rank as receiver_rank.
+    GPU-rdma_device topology will be considered to make full use of the bandwidth.
+    """
+    # if ranks is empty, assign the owner_rank as receiver_rank, this is used for colocate architecture
+    if not ranks:
+        return [(owner_rank, owner_rank, bucket) for owner_rank, bucket in buckets]
+    rank_to_rdma_device = {
+        rank: rdma_device for rdma_device, ranks in remote_topo.items() for rank in ranks
+    }
+
+    # group buckets by owner RDMA devices
+    buckets_by_rdma_device = defaultdict(list)
+    for owner_rank, bucket in buckets:
+        owner_rdma_device = rank_to_rdma_device[owner_rank]
+        buckets_by_rdma_device[owner_rdma_device].append((owner_rank, bucket))
+
+    buckets_matrix = list(buckets_by_rdma_device.values())
+
+    # select receiver ranks
+    num_receivers = min(len(local_topo), len(buckets_by_rdma_device))
+    receiver_list = [min(ranks) for ranks in list(local_topo.values())[:num_receivers]]
+
+    flattened_buckets = [
+        buckets_matrix[row][col]
+        for col in range(max(len(col) for col in buckets_matrix) if buckets_matrix else 0)
+        for row in range(len(buckets_matrix))
+        if col < len(buckets_matrix[row])
+    ]
+
+    buckets_with_receiver = []
+    for i, (owner_rank, bucket) in enumerate(flattened_buckets):
+        receiver_rank = receiver_list[i % len(receiver_list)]
+        buckets_with_receiver.append((receiver_rank, owner_rank, bucket))
+        logger.debug(
+            f"Assigned bucket with owner_rank {owner_rank} to receiver_rank {receiver_rank}"
+        )
+
+    return buckets_with_receiver
 
 
 def _get_master_port(master_port: int | None = None) -> int:
@@ -532,14 +592,14 @@ class P2PStore:
         self.rank = int(os.getenv("RANK"))
         gpu_count = torch.cuda.device_count()
         local_rank = self.rank % gpu_count
-        device = _get_my_rdma_device(local_rank, gpu_count, _get_rdma_devices())
+        self.device = _get_my_rdma_device(local_rank, gpu_count, _get_rdma_devices())
         self.ip = _get_ip()
 
         # we will start at most 8 ps processes, so we use 8 retries to avoid port conflicts in extreme cases
         retry_count = 8
         for i in range(retry_count):
             self.engine = TransferEngine()
-            ret = self.engine.initialize(self.ip, "P2PHANDSHAKE", "rdma", device)
+            ret = self.engine.initialize(self.ip, "P2PHANDSHAKE", "rdma", self.device)
             if ret == 0:
                 break
             # sleep 0.5 ~ 2.0s, to avoid port conflicts when two processes retry at the same time
@@ -553,7 +613,7 @@ class P2PStore:
         self.port = self.engine.get_rpc_port()
         self.named_tensors: dict[str, torch.Tensor] = {}
         logger.info(
-            f"[rank{self.rank}] p2p store initialized, addr is {self.addr}, rdma device is {device}"
+            f"[rank{self.rank}] p2p store initialized, addr is {self.addr}, rdma device is {self.device}"
         )
 
     @property
@@ -608,6 +668,8 @@ class ParameterServer:
         self._auto_pg = auto_pg
         self._all_hosts = []
         self._global_device_uuids: list[str] = []
+        self._local_rdma_devices: dict[str, set[int]] = defaultdict(set)
+        self._remote_rdma_devices: dict[str, set[int]] = defaultdict(set)
 
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
@@ -627,6 +689,7 @@ class ParameterServer:
         device_index = self._local_rank
         torch.cuda.set_device(device_index)
         self._device_uuid = _get_physical_gpu_id(device_index)
+        self.rdma_device = None if self._p2p_store is None else self._p2p_store.device
 
     def _logger_rank0(self, msg: str):
         if self._local_rank == 0:
@@ -637,6 +700,10 @@ class ParameterServer:
 
     def load_metas(self, metas: dict[int, MemoryBufferMetaList]):
         self._current_global_parameter_metas = metas
+        for i, meta in self._current_global_parameter_metas.items():
+            self._remote_rdma_devices[
+                meta.rdma_device + "@" + meta.p2p_store_addr.split(":")[0]
+            ].add(i)
 
     def register_checkpoint(
         self,
@@ -710,11 +777,11 @@ class ParameterServer:
             p2p_store_addr=None if self._p2p_store is None else self._p2p_store.addr,
             host_ip=_get_ip(),
             device_uuid=self._device_uuid,
+            rdma_device=self.rdma_device or "",
         )
 
         dist.all_gather_object(metas_lst, metas)
 
-        self._current_global_parameter_metas = {}
         num_parameters = 0
         all_hosts: list[str] = []
         global_device_uuids: list[str] = []
@@ -727,10 +794,14 @@ class ParameterServer:
             if metas_buckets.memory_buffer_metas_list:
                 self._current_global_parameter_metas[i] = metas_buckets
                 num_parameters += sum(len(x.metas) for x in metas_buckets.memory_buffer_metas_list)
+            self._local_rdma_devices[metas_buckets.rdma_device + "@" + metas.host_ip].add(i)
         if not self._all_hosts:
             self._all_hosts = all_hosts
         if not self._global_device_uuids:
             self._global_device_uuids = global_device_uuids
+        # Sender node and Receiver node have the same GPU-rdma_device topology is considered as default.
+        # Rewrite the sender's topology (_remote_rdma_devices) by calling load_metas.
+        self._remote_rdma_devices = self._local_rdma_devices.copy()
         logger.info(
             f"[rank{self._rank}] gather parameter metas finished, num_parameters: {num_parameters}"
         )
@@ -792,15 +863,15 @@ class ParameterServer:
                     self.init_process_group()
                 self._update_per_bucket(checkpoint_name, req_func)
             else:
-                if self._rank not in ranks:
-                    return
                 if self._auto_pg:
                     if dist.is_initialized():
                         dist.destroy_process_group()
                         # HACK: wait 2s to ensure destroy is finished
                         time.sleep(2)
                     self.init_process_group_for_ranks(ranks)
-                self._update_per_bucket_p2p(checkpoint_name, req_func, ranks)
+                if self._rank not in ranks:
+                    return
+                self._update_per_bucket(checkpoint_name, req_func, ranks)
             if self._auto_pg:
                 dist.destroy_process_group()
 
@@ -945,71 +1016,6 @@ class ParameterServer:
             backend="nccl", world_size=len(ranks), rank=rank, timeout=timeout, store=store
         )
 
-    def _update_per_bucket_p2p(
-        self,
-        checkpoint_name: str,
-        req_func: Callable[[list[tuple[str, str]]], None],
-        ranks: list[int],
-    ):
-        assert self._p2p_store is not None, "p2p store is not initialized"
-        assert ranks, "ranks should be set"
-        if len(self._current_global_parameter_metas) == 0:
-            raise ValueError("parameter metas is empty")
-        assert dist.is_initialized(), (
-            "process group is not initialized when update model per bucket p2p"
-        )
-
-        need_update = self._rank in ranks
-        logger.info(
-            f"[rank{self._rank}] update checkpoint {checkpoint_name} p2p, {need_update=} with {ranks=}, "
-            f"gpu_count {self._gpu_count}, world_size {self._world_size}"
-        )
-
-        if not need_update:
-            return
-
-        # first execute a barrier to avoid subsequent cuda oom
-        dist.barrier()
-
-        bucket_size, _ = self._detect_bucket_size(disable_h2d_buffer=True)
-        buffer = torch.empty(bucket_size * 2, dtype=torch.uint8, device="cuda")
-        ipc_buffer_name = "__ipc_buffer___"
-        self._p2p_store.register_named_tensors({ipc_buffer_name: buffer})
-        logger.info(
-            f"[rank{self._rank}] register buffer, shape={buffer.shape}, dtype={buffer.dtype}, data_ptr={buffer.data_ptr()}, nbytes={buffer.nbytes}"
-        )
-        handle = reduce_tensor(buffer)
-
-        buckets = _gen_h2d_buckets(self._current_global_parameter_metas, bucket_size)
-        socket, socket_paths = self._bind_zmq_socket()
-        req_thread = threading.Thread(
-            target=req_func,
-            args=(socket_paths,),
-        )
-        req_thread.start()
-        socket.send_pyobj(handle)
-        for gidx, (owner_rank, bucket) in enumerate(buckets):
-            self._logger_rank0(
-                f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} owner_rank {owner_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
-            )
-            _buffer = buffer[gidx % 2 * bucket_size : gidx % 2 * bucket_size + bucket.size]
-            if dist.get_rank() == 0:
-                self._copy_to_buffer(checkpoint_name, bucket, _buffer, owner_rank)
-            # broadcast the collected data to all ranks
-            dist.broadcast(_buffer, src=0)
-            socket.recv()
-            dist.barrier()
-            socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
-
-        socket.recv()
-        socket.send_pyobj(None)
-        socket.recv()
-        req_thread.join()
-        dist.barrier()
-        socket.close()
-        self._p2p_store.unregister_named_tensors([ipc_buffer_name])
-        torch.cuda.empty_cache()
-
     def _get_addr_ptrs(self, owner_rank: int) -> tuple[str, list[tuple[int, int]]]:
         addr = self._current_global_parameter_metas[owner_rank].p2p_store_addr
         metas_list = self._current_global_parameter_metas[owner_rank].memory_buffer_metas_list
@@ -1035,42 +1041,94 @@ class ParameterServer:
             [f"memory_pool_{checkpoint_name}_{idx}" for idx, _ in enumerate(pool)]
         )
 
+    def _get_bcast_rank_map(self, ranks: list[int]) -> dict[int, int]:
+        """
+        map the real ranks (receiver_rank) to the bcast ranks (0 ~ len(ranks) - 1),
+        which are generated in self.init_process_group_for_ranks
+        """
+        bcast_rank_map: dict[int, int] = {}
+        if not ranks:
+            bcast_rank_map = {r: r for r in range(self._world_size)}
+        else:
+            for i, r in enumerate(ranks):
+                bcast_rank_map[r] = i
+        return bcast_rank_map
+
     def _update_per_bucket(
         self,
         checkpoint_name: str,
         req_func: Callable[[list[tuple[str, str]]], None],
+        ranks: list[int] | None = None,
     ):
-        if len(self._current_global_parameter_metas) == 0:
-            raise ValueError("parameter metas is empty")
+        logger.warning(
+            f"[rank{self._rank}] Using _update_per_bucket, which is an experimental feature."
+        )
+        assert req_func is not None
+        # if both ranks is None or [], it will use fully broadcast to update to all ranks
+        if not ranks:
+            if len(self._current_global_parameter_metas) == 0:
+                raise ValueError("parameter metas is empty")
 
-        assert dist.is_initialized(), "process group is not initialized"
+            assert dist.is_initialized(), "process group is not initialized"
 
-        logger.info(f"[rank{self._rank}] update checkpoint {checkpoint_name}")
+            logger.info(f"[rank{self._rank}] update checkpoint {checkpoint_name}")
+        # if ranks is set, it will use p2p to update to the ranks
+        else:
+            assert self._p2p_store is not None, "p2p store is not initialized"
+            assert ranks, "ranks should be set"
+            if len(self._current_global_parameter_metas) == 0:
+                raise ValueError("parameter metas is empty")
+            assert dist.is_initialized(), (
+                "process group is not initialized when update model per bucket p2p"
+            )
+
+            need_update = self._rank in ranks
+            logger.info(
+                f"[rank{self._rank}] update checkpoint {checkpoint_name} p2p, {need_update=} with {ranks=}, "
+                f"gpu_count {self._gpu_count}, world_size {self._world_size}"
+            )
+
+            if not need_update:
+                return
+            # first execute a barrier to avoid subsequent cuda oom
+            dist.barrier()
 
         bucket_size, disable_h2d_buffer = self._detect_bucket_size()
-        buckets = _gen_h2d_buckets(self._current_global_parameter_metas, bucket_size)
+        buckets = _gen_h2d_buckets(
+            self._current_global_parameter_metas,
+            bucket_size,
+            self._local_rdma_devices,
+            self._remote_rdma_devices,
+            ranks,
+        )
 
         h2d_buffer: torch.Tensor | None = (
             None
             if disable_h2d_buffer
             else torch.empty(bucket_size, dtype=torch.uint8, device="cuda")
         )
+        # p2p store need to register h2d_buffer to let other ranks read
+        if ranks:
+            h2d_buffer_name = "__h2d_buffer__"
+            self._p2p_store.register_named_tensors(
+                {h2d_buffer_name: h2d_buffer}
+            ) if h2d_buffer is not None else None
 
-        owner_rank_buckets: list[H2DBucket] = []
-        for owner_rank, bucket in buckets:
-            if owner_rank != self._rank:
+        receiver_rank_buckets: list[tuple[int, H2DBucket]] = []
+        for receiver_rank, owner_rank, bucket in buckets:
+            if receiver_rank != self._rank:
                 continue
-            owner_rank_buckets.append(bucket)
+            receiver_rank_buckets.append((owner_rank, bucket))
 
         buffer = torch.empty(bucket_size * 2, dtype=torch.uint8, device="cuda")
         handle = reduce_tensor(buffer)
 
-        buckets_by_owner_rank: dict[int, list[H2DBucket]] = defaultdict(list)
+        buckets_by_receiver_rank: dict[int, list[H2DBucket]] = defaultdict(list)
         max_len = 0
-        for owner_rank, bucket in buckets:
-            buckets_by_owner_rank[owner_rank].append(bucket)
-            if len(buckets_by_owner_rank[owner_rank]) > max_len:
-                max_len = len(buckets_by_owner_rank[owner_rank])
+        for receiver_rank, _, bucket in buckets:
+            buckets_by_receiver_rank[receiver_rank].append(bucket)
+            if len(buckets_by_receiver_rank[receiver_rank]) > max_len:
+                max_len = len(buckets_by_receiver_rank[receiver_rank])
 
         socket, socket_paths = self._bind_zmq_socket()
         req_thread = threading.Thread(
@@ -1082,10 +1140,17 @@ class ParameterServer:
 
         gidx = 0
         for i in range(max_len):
-            if i < len(owner_rank_buckets) and not disable_h2d_buffer:
-                self._copy_to_buffer(checkpoint_name, owner_rank_buckets[i], h2d_buffer)
-
-            for owner_rank, _buckets in buckets_by_owner_rank.items():
+            if i < len(receiver_rank_buckets) and not disable_h2d_buffer:
+                if not ranks:
+                    self._copy_to_buffer(checkpoint_name, receiver_rank_buckets[i][1], h2d_buffer)
+                else:
+                    self._copy_to_buffer(
+                        checkpoint_name,
+                        receiver_rank_buckets[i][1],
+                        h2d_buffer,
+                        receiver_rank_buckets[i][0],
+                    )
+            for receiver_rank, _buckets in buckets_by_receiver_rank.items():
                 if i >= len(_buckets):
                     continue
                 bucket = _buckets[i]
@@ -1094,18 +1159,19 @@ class ParameterServer:
                     torch.cuda.memory_reserved() / 1024 / 1024,
                 )
                 self._logger_rank0(
-                    f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} owner_rank {owner_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
+                    f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} receiver_rank {receiver_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
                     f"Current CUDA allocated {alloc:.2f} MB, "
                     f"reserved {reserved:.2f} MB."
                 )
                 start = gidx % 2 * bucket_size
                 buffer_b: torch.Tensor = buffer[start : start + bucket.size]
-                if owner_rank == self._rank:
+                if receiver_rank == self._rank:
                     if disable_h2d_buffer:
                         self._copy_to_buffer(checkpoint_name, bucket, buffer_b)
                     else:
                         buffer_b.data.copy_(h2d_buffer[: bucket.size])
-                dist.broadcast(buffer_b, src=owner_rank)
+                brank = self._get_bcast_rank_map(ranks)[receiver_rank]
+                dist.broadcast(buffer_b, src=brank)
                 socket.recv()
                 dist.barrier()
                 socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
@@ -1117,6 +1183,9 @@ class ParameterServer:
         req_thread.join()
         dist.barrier()
         socket.close()
+        if ranks and h2d_buffer is not None:
+            self._p2p_store.unregister_named_tensors([h2d_buffer_name])
+
         torch.cuda.empty_cache()
 
 
