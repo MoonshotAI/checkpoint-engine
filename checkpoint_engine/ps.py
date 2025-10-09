@@ -592,7 +592,7 @@ class P2PStore:
 
 class ParameterServer:
     def __init__(
-        self, *, rank: int | None = None, world_size: int | None = None, auto_pg: bool = False
+        self, *, rank: int | None = None, world_size: int | None = None, auto_pg: bool = False, mem_fraction: float | None = None
     ):
         """
         Initialize the parameter server. env RANK, WORLD_SIZE and MASTER_ADDR must be set.
@@ -608,6 +608,7 @@ class ParameterServer:
         self._auto_pg = auto_pg
         self._all_hosts = []
         self._global_device_uuids: list[str] = []
+        self._mem_fraction = mem_fraction or 0.9
 
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
@@ -615,6 +616,10 @@ class ParameterServer:
                 self._gpu_count > 0 and
                 self._gpu_count <= torch.cuda.device_count()
         ), self._gpu_count
+        assert (self._mem_fraction is not None and
+                self._mem_fraction > 0 and
+                self._mem_fraction <= 1
+        ), self._mem_fraction
 
         self._zmq_ctx = zmq.Context()
         self._zmq_addr_counter = 0
@@ -836,8 +841,8 @@ class ParameterServer:
         # auto detect bucket size
         tensor = torch.tensor(
             [
-                # 90% of current cuda free memory bytes
-                int(float(torch.cuda.mem_get_info()[0]) * 0.9),
+                # proportion of current cuda free memory bytes
+                int(float(torch.cuda.mem_get_info()[0]) * self._mem_fraction),
                 # we use negative value to reuse allreduce min operation
                 # for getting the max value of zmq_addr_counter in all ranks
                 -self._zmq_addr_counter,
