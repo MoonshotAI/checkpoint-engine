@@ -603,7 +603,7 @@ class ParameterServer:
         """
         self._rank = rank or int(os.environ.get("RANK", None))
         self._world_size = world_size or int(os.environ.get("WORLD_SIZE", None))
-        self._gpu_count = torch.cuda.device_count()
+        self._gpu_count = self._world_size or torch.cuda.device_count()
         self._local_rank = self._rank % self._gpu_count
         self._auto_pg = auto_pg
         self._all_hosts = []
@@ -611,6 +611,10 @@ class ParameterServer:
 
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
+        assert (self._gpu_count is not None and
+                self._gpu_count > 0 and
+                self._gpu_count <= torch.cuda.device_count()
+        ), self._gpu_count
 
         self._zmq_ctx = zmq.Context()
         self._zmq_addr_counter = 0
