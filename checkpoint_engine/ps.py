@@ -592,7 +592,13 @@ class P2PStore:
 
 class ParameterServer:
     def __init__(
-        self, *, rank: int | None = None, world_size: int | None = None, auto_pg: bool = False, mem_fraction: float | None = None
+        self,
+        *,
+        rank: int | None = None,
+        world_size: int | None = None,
+        auto_pg: bool = False,
+        gpu_count: int | None = None,
+        mem_fraction: float | None = None,
     ):
         """
         Initialize the parameter server. env RANK, WORLD_SIZE and MASTER_ADDR must be set.
@@ -600,10 +606,11 @@ class ParameterServer:
         Args:
             auto_pg: Whether to automatically initialize the process group.
                 Notice that if auto_pg is True, will destroy the process group after update.
+            mem_fraction: The proportion (as a fraction) of the current free CUDA memory for allocation.
         """
         self._rank = rank or int(os.environ.get("RANK", None))
         self._world_size = world_size or int(os.environ.get("WORLD_SIZE", None))
-        self._gpu_count = self._world_size or torch.cuda.device_count()
+        self._gpu_count = gpu_count or torch.cuda.device_count()
         self._local_rank = self._rank % self._gpu_count
         self._auto_pg = auto_pg
         self._all_hosts = []
@@ -612,13 +619,13 @@ class ParameterServer:
 
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
-        assert (self._gpu_count is not None and
-                self._gpu_count > 0 and
-                self._gpu_count <= torch.cuda.device_count()
+        assert (
+            self._gpu_count is not None
+            and self._gpu_count > 0
+            and self._gpu_count <= torch.cuda.device_count()
         ), self._gpu_count
-        assert (self._mem_fraction is not None and
-                self._mem_fraction > 0 and
-                self._mem_fraction <= 1
+        assert (
+            self._mem_fraction is not None and self._mem_fraction > 0 and self._mem_fraction <= 1
         ), self._mem_fraction
 
         self._zmq_ctx = zmq.Context()
