@@ -553,8 +553,9 @@ def _assign_receiver_ranks(
         buckets_by_rdma_device[owner_rdma_device].append((owner_rank, bucket))
 
     buckets_matrix = list(buckets_by_rdma_device.values())
+    assert buckets_matrix, "buckets_matrix should not be empty"
 
-    # select receiver ranks
+    # Select receiver ranks. We use the minimum rank in each local RDMA device group as receiver rank
     num_receivers = min(len(local_topo), len(buckets_by_rdma_device))
     receiver_list = [min(ranks) for ranks in list(local_topo.values())[:num_receivers]]
 
@@ -581,6 +582,19 @@ def _get_master_port(master_port: int | None = None) -> int:
         # TODO: check whether master_port is available or use a more elegant way
         master_port = int(os.getenv("MASTER_PORT")) + 1
     return master_port
+
+def _get_bcast_rank_map(world_size, ranks: list[int] | None) -> dict[int, int]:
+    """
+    map the real ranks (receiver_rank) to the bcast ranks (0 ~ len(ranks) - 1),
+    which are generated in self.init_process_group_for_ranks
+    """
+    bcast_rank_map: dict[int, int] = {}
+    if not ranks:
+        bcast_rank_map = {r: r for r in range(world_size)}
+    else:
+        for i, r in enumerate(ranks):
+            bcast_rank_map[r] = i
+    return bcast_rank_map
 
 
 class P2PStore:
@@ -877,6 +891,7 @@ class ParameterServer:
                 If set, will use p2p to update to the ranks, this is flexible to update to a group of ranks,
                 which is useful in disaggregated architecture.
         """
+        assert req_func is not None, "req_func is required"
         try:
             # if both ranks is None or [], it will use fully broadcast to update to all ranks
             if not ranks:
@@ -1062,19 +1077,6 @@ class ParameterServer:
             [f"memory_pool_{checkpoint_name}_{idx}" for idx, _ in enumerate(pool)]
         )
 
-    def _get_bcast_rank_map(self, ranks: list[int]) -> dict[int, int]:
-        """
-        map the real ranks (receiver_rank) to the bcast ranks (0 ~ len(ranks) - 1),
-        which are generated in self.init_process_group_for_ranks
-        """
-        bcast_rank_map: dict[int, int] = {}
-        if not ranks:
-            bcast_rank_map = {r: r for r in range(self._world_size)}
-        else:
-            for i, r in enumerate(ranks):
-                bcast_rank_map[r] = i
-        return bcast_rank_map
-
     def _update_per_bucket(
         self,
         checkpoint_name: str,
@@ -1084,24 +1086,15 @@ class ParameterServer:
         logger.warning(
             f"[rank{self._rank}] Using _update_per_bucket, which is an experimental feature."
         )
-        assert req_func is not None
+        assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"
+        assert dist.is_initialized(), "process group is not initialized"
         # if both ranks is None or [], it will use fully broadcast to update to all ranks
         if not ranks:
-            if len(self._current_global_parameter_metas) == 0:
-                raise ValueError("parameter metas is empty")
-
-            assert dist.is_initialized(), "process group is not initialized"
-
             logger.info(f"[rank{self._rank}] update checkpoint {checkpoint_name}")
         # if ranks is set, it will use p2p to update to the ranks
         else:
             assert self._p2p_store is not None, "p2p store is not initialized"
             assert ranks, "ranks should be set"
-            if len(self._current_global_parameter_metas) == 0:
-                raise ValueError("parameter metas is empty")
-            assert dist.is_initialized(), (
-                "process group is not initialized when update model per bucket p2p"
-            )
 
             need_update = self._rank in ranks
             logger.info(
@@ -1131,10 +1124,10 @@ class ParameterServer:
         # p2p store need to register h2d_buffer to let other ranks read
         if ranks:
             h2d_buffer_name = "__h2d_buffer__"
-            self._p2p_store.register_named_tensors(
-                {h2d_buffer_name: h2d_buffer}
-            ) if h2d_buffer is not None else None
-
+            if h2d_buffer is not None and self._p2p_store is not None:
+                self._p2p_store.register_named_tensors(
+                    {h2d_buffer_name: h2d_buffer}
+                )
         receiver_rank_buckets: list[tuple[int, H2DBucket]] = []
         for receiver_rank, owner_rank, bucket in buckets:
             if receiver_rank != self._rank:
@@ -1160,17 +1153,15 @@ class ParameterServer:
         socket.send_pyobj(handle)
 
         gidx = 0
+        bcast_rank_map = _get_bcast_rank_map(self._world_size, ranks)
         for i in range(max_len):
             if i < len(receiver_rank_buckets) and not disable_h2d_buffer:
-                if not ranks:
-                    self._copy_to_buffer(checkpoint_name, receiver_rank_buckets[i][1], h2d_buffer)
-                else:
-                    self._copy_to_buffer(
-                        checkpoint_name,
-                        receiver_rank_buckets[i][1],
-                        h2d_buffer,
-                        receiver_rank_buckets[i][0],
-                    )
+                self._copy_to_buffer(
+                    checkpoint_name,
+                    receiver_rank_buckets[i][1],
+                    h2d_buffer,
+                    receiver_rank_buckets[i][0] if ranks else None,
+                )
             for receiver_rank, _buckets in buckets_by_receiver_rank.items():
                 if i >= len(_buckets):
                     continue
@@ -1191,7 +1182,7 @@ class ParameterServer:
                         self._copy_to_buffer(checkpoint_name, bucket, buffer_b)
                     else:
                         buffer_b.data.copy_(h2d_buffer[: bucket.size])
-                brank = self._get_bcast_rank_map(ranks)[receiver_rank]
+                brank = bcast_rank_map[receiver_rank]
                 dist.broadcast(buffer_b, src=brank)
                 socket.recv()
                 dist.barrier()
