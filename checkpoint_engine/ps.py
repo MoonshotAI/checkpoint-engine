@@ -11,7 +11,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from datetime import timedelta
 from functools import lru_cache
-from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, NamedTuple, TypeVar
 
 import httpx
 import numpy as np
@@ -531,17 +531,25 @@ def _gen_h2d_buckets(
         return _assign_receiver_ranks(buckets, actual_local_topo, remote_topo)
 
 
+T = TypeVar("T")
+
+
 def _assign_receiver_ranks(
-    buckets: list[tuple[int, H2DBucket]],
+    buckets: list[tuple[int, "T"]],
     local_topo: dict[str, set[int]],
     remote_topo: dict[str, set[int]],
-) -> list[tuple[int, int, H2DBucket]]:
+) -> list[tuple[int, int, "T"]]:
     """
     (owner_rank, bucket) -> (receiver_rank, owner_rank, bucket)
 
     Assign receiver ranks to buckets. If ranks is empty, assign the owner_rank as receiver_rank.
     GPU-rdma_device topology will be considered to make full use of the bandwidth.
     """
+    assert local_topo, "local_topo should not be empty"
+    assert remote_topo, "remote_topo should not be empty"
+    if not buckets:
+        logger.warning("bucket list is empty, no need to assign receiver ranks")
+        return []
     rank_to_rdma_device = {
         rank: rdma_device for rdma_device, ranks in remote_topo.items() for rank in ranks
     }
