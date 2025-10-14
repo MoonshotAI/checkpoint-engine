@@ -120,12 +120,12 @@ class MemoryBuffer(BaseModel):
 class MemoryBufferMetaList(BaseModel):
     p2p_store_addr: str | None
     memory_buffer_metas_list: list[MemoryBufferMetas]
+    rdma_device: str
 
 
 class DataToGather(MemoryBufferMetaList):
     host_ip: str
     device_uuid: str
-    rdma_device: str
 
 
 # 256 bytes alignment when flatten torch tensors to uint8 buffer
@@ -527,15 +527,17 @@ def _gen_h2d_buckets(
         if ranks
         else local_topo
     )
-    buckets_with_receiver = _assign_receiver_ranks(buckets, actual_local_topo, remote_topo, ranks)
-    return buckets_with_receiver
+    # if ranks is empty, assign the owner_rank as receiver_rank, this is used for colocate architecture
+    if not ranks:
+        return [(owner_rank, owner_rank, bucket) for owner_rank, bucket in buckets]
+    else:
+        return _assign_receiver_ranks(buckets, actual_local_topo, remote_topo)
 
 
 def _assign_receiver_ranks(
     buckets: list[tuple[int, H2DBucket]],
     local_topo: dict[str, set[int]],
     remote_topo: dict[str, set[int]],
-    ranks: list[int] | None = None,
 ) -> list[tuple[int, int, H2DBucket]]:
     """
     (owner_rank, bucket) -> (receiver_rank, owner_rank, bucket)
@@ -543,9 +545,6 @@ def _assign_receiver_ranks(
     Assign receiver ranks to buckets. If ranks is empty, assign the owner_rank as receiver_rank.
     GPU-rdma_device topology will be considered to make full use of the bandwidth.
     """
-    # if ranks is empty, assign the owner_rank as receiver_rank, this is used for colocate architecture
-    if not ranks:
-        return [(owner_rank, owner_rank, bucket) for owner_rank, bucket in buckets]
     rank_to_rdma_device = {
         rank: rdma_device for rdma_device, ranks in remote_topo.items() for rank in ranks
     }
@@ -573,7 +572,7 @@ def _assign_receiver_ranks(
     for i, (owner_rank, bucket) in enumerate(flattened_buckets):
         receiver_rank = receiver_list[i % len(receiver_list)]
         buckets_with_receiver.append((receiver_rank, owner_rank, bucket))
-        logger.debug(
+        logger.info(
             f"Assigned bucket with owner_rank {owner_rank} to receiver_rank {receiver_rank}"
         )
 
@@ -692,7 +691,7 @@ class ParameterServer:
         device_index = self._local_rank
         torch.cuda.set_device(device_index)
         self._device_uuid = _get_physical_gpu_id(device_index)
-        self.rdma_device = None if self._p2p_store is None else self._p2p_store.device
+        self._rdma_device = None if self._p2p_store is None else self._p2p_store.device
 
     def _logger_rank0(self, msg: str):
         if self._local_rank == 0:
@@ -703,10 +702,15 @@ class ParameterServer:
 
     def load_metas(self, metas: dict[int, MemoryBufferMetaList]):
         self._current_global_parameter_metas = metas
-        for i, meta in self._current_global_parameter_metas.items():
-            self._remote_rdma_devices[
-                meta.rdma_device + "@" + meta.p2p_store_addr.split(":")[0]
-            ].add(i)
+        self._remote_rdma_devices = defaultdict(set)
+        try:
+            for i, meta in self._current_global_parameter_metas.items():
+                self._remote_rdma_devices[
+                    meta.rdma_device + "@" + meta.p2p_store_addr.split(":")[0]
+                ].add(i)
+        except AttributeError as e:
+            self._remote_rdma_devices = self._local_rdma_devices.copy()
+            logger.warning(f"[rank{self._rank}] encountered {e}, use local rdma devices as remote")
 
     def register_checkpoint(
         self,
@@ -780,7 +784,7 @@ class ParameterServer:
             p2p_store_addr=None if self._p2p_store is None else self._p2p_store.addr,
             host_ip=_get_ip(),
             device_uuid=self._device_uuid,
-            rdma_device=self.rdma_device or "",
+            rdma_device=self._rdma_device or "",
         )
 
         dist.all_gather_object(metas_lst, metas)
@@ -795,7 +799,11 @@ class ParameterServer:
             if not self._global_device_uuids:
                 global_device_uuids.append(metas_buckets.device_uuid)
             if metas_buckets.memory_buffer_metas_list:
-                self._current_global_parameter_metas[i] = metas_buckets
+                self._current_global_parameter_metas[i] = MemoryBufferMetaList(
+                    memory_buffer_metas_list=metas_buckets.memory_buffer_metas_list,
+                    p2p_store_addr=metas_buckets.p2p_store_addr,
+                    rdma_device=metas_buckets.rdma_device,
+                )
                 num_parameters += sum(len(x.metas) for x in metas_buckets.memory_buffer_metas_list)
             self._local_rdma_devices[metas_buckets.rdma_device + "@" + metas.host_ip].add(i)
         if not self._all_hosts:
