@@ -560,7 +560,9 @@ def _assign_receiver_ranks(
 
     flattened_buckets = [
         buckets_matrix[row][col]
-        for col in range(max(len(col) for col in buckets_matrix) if buckets_matrix else 0)
+        for col in range(
+            max(len(matrix_row) for matrix_row in buckets_matrix) if buckets_matrix else 0
+        )
         for row in range(len(buckets_matrix))
         if col < len(buckets_matrix[row])
     ]
@@ -716,14 +718,12 @@ class ParameterServer:
     def load_metas(self, metas: dict[int, MemoryBufferMetaList]):
         self._current_global_parameter_metas = metas
         self._remote_rdma_devices = defaultdict(set)
-        try:
-            for i, meta in self._current_global_parameter_metas.items():
-                self._remote_rdma_devices[
-                    meta.rdma_device + "@" + meta.p2p_store_addr.split(":")[0]
-                ].add(i)
-        except AttributeError as e:
-            self._remote_rdma_devices = self._local_rdma_devices.copy()
-            logger.warning(f"[rank{self._rank}] encountered {e}, use local rdma devices as remote")
+        for i, meta in self._current_global_parameter_metas.items():
+            assert meta.rdma_device is not None, "meta.rdma_device should not be None"
+            assert meta.p2p_store_addr is not None, "meta.p2p_store_addr should not be None"
+            self._remote_rdma_devices[
+                meta.rdma_device + "@" + meta.p2p_store_addr.split(":")[0]
+            ].add(i)
 
     def register_checkpoint(
         self,
