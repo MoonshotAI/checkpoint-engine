@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import concurrent.futures
 import ctypes
@@ -10,6 +8,7 @@ import socket
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import timedelta
 from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, NamedTuple
@@ -26,8 +25,6 @@ from torch.multiprocessing.reductions import reduce_tensor
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from typing_extensions import TypedDict
 
     class FileMeta(TypedDict):
@@ -152,8 +149,8 @@ def _to_named_tensor(metas: list[ParameterMeta], offset: int = 0) -> list[dict]:
     return ret
 
 
-def _load_checkpoint_file(file_path: str) -> tuple[int, dict[str, tuple[FileMeta, torch.Tensor]]]:
-    def _safetensors_load(fn: str) -> dict[str, tuple[FileMeta, torch.Tensor]]:
+def _load_checkpoint_file(file_path: str) -> tuple[int, dict[str, tuple["FileMeta", torch.Tensor]]]:
+    def _safetensors_load(fn: str) -> dict[str, tuple["FileMeta", torch.Tensor]]:
         ret = {}
         with safe_open(fn, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
@@ -169,7 +166,7 @@ def _load_checkpoint_file(file_path: str) -> tuple[int, dict[str, tuple[FileMeta
         return ret
 
     # deprecated, will be removed in the future
-    def _fast_np_load(fn: str) -> dict[str, tuple[FileMeta, torch.Tensor]]:
+    def _fast_np_load(fn: str) -> dict[str, tuple["FileMeta", torch.Tensor]]:
         """load *.np file and return memmap and related tensor meta"""
 
         def parse_npy_header(fin: BinaryIO) -> dict[str, Any]:
@@ -654,7 +651,13 @@ class P2PStore:
 
 class ParameterServer:
     def __init__(
-        self, *, rank: int | None = None, world_size: int | None = None, auto_pg: bool = False
+        self,
+        *,
+        rank: int | None = None,
+        world_size: int | None = None,
+        auto_pg: bool = False,
+        gpu_count: int | None = None,
+        mem_fraction: float | None = None,
     ):
         """
         Initialize the parameter server. env RANK, WORLD_SIZE and MASTER_ADDR must be set.
@@ -662,19 +665,29 @@ class ParameterServer:
         Args:
             auto_pg: Whether to automatically initialize the process group.
                 Notice that if auto_pg is True, will destroy the process group after update.
+            mem_fraction: The proportion (as a fraction) of the current free CUDA memory for allocation.
         """
         self._rank = rank or int(os.environ.get("RANK", None))
         self._world_size = world_size or int(os.environ.get("WORLD_SIZE", None))
-        self._gpu_count = torch.cuda.device_count()
+        self._gpu_count = gpu_count or torch.cuda.device_count()
         self._local_rank = self._rank % self._gpu_count
         self._auto_pg = auto_pg
         self._all_hosts = []
         self._global_device_uuids: list[str] = []
         self._local_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._remote_rdma_devices: dict[str, set[int]] = defaultdict(set)
+        self._mem_fraction = mem_fraction or 0.9
 
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
+        assert (
+            self._gpu_count is not None
+            and self._gpu_count > 0
+            and self._gpu_count <= torch.cuda.device_count()
+        ), self._gpu_count
+        assert (
+            self._mem_fraction is not None and self._mem_fraction > 0 and self._mem_fraction <= 1
+        ), self._mem_fraction
 
         self._zmq_ctx = zmq.Context()
         self._zmq_addr_counter = 0
@@ -879,6 +892,8 @@ class ParameterServer:
                         dist.destroy_process_group()
                         # HACK: wait 2s to ensure destroy is finished
                         time.sleep(2)
+                    if self._rank not in ranks:
+                        return
                     self.init_process_group_for_ranks(ranks)
                 if self._rank not in ranks:
                     return
@@ -914,8 +929,8 @@ class ParameterServer:
         # auto detect bucket size
         tensor = torch.tensor(
             [
-                # 90% of current cuda free memory bytes
-                int(float(torch.cuda.mem_get_info()[0]) * 0.9),
+                # proportion of current cuda free memory bytes
+                int(float(torch.cuda.mem_get_info()[0]) * self._mem_fraction),
                 # we use negative value to reuse allreduce min operation
                 # for getting the max value of zmq_addr_counter in all ranks
                 -self._zmq_addr_counter,
