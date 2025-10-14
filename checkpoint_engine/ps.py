@@ -571,9 +571,6 @@ def _assign_receiver_ranks(
     for i, (owner_rank, bucket) in enumerate(flattened_buckets):
         receiver_rank = receiver_list[i % len(receiver_list)]
         buckets_with_receiver.append((receiver_rank, owner_rank, bucket))
-        logger.info(
-            f"Assigned bucket with owner_rank {owner_rank} to receiver_rank {receiver_rank}"
-        )
 
     return buckets_with_receiver
 
