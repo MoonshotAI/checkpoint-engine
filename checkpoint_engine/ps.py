@@ -583,7 +583,8 @@ def _get_master_port(master_port: int | None = None) -> int:
         master_port = int(os.getenv("MASTER_PORT")) + 1
     return master_port
 
-def _get_bcast_rank_map(world_size, ranks: list[int] | None) -> dict[int, int]:
+
+def _get_bcast_rank_map(world_size: int, ranks: list[int] | None) -> dict[int, int]:
     """
     map the real ranks (receiver_rank) to the bcast ranks (0 ~ len(ranks) - 1),
     which are generated in self.init_process_group_for_ranks
@@ -1125,9 +1126,7 @@ class ParameterServer:
         if ranks:
             h2d_buffer_name = "__h2d_buffer__"
             if h2d_buffer is not None and self._p2p_store is not None:
-                self._p2p_store.register_named_tensors(
-                    {h2d_buffer_name: h2d_buffer}
-                )
+                self._p2p_store.register_named_tensors({h2d_buffer_name: h2d_buffer})
         receiver_rank_buckets: list[tuple[int, H2DBucket]] = []
         for receiver_rank, owner_rank, bucket in buckets:
             if receiver_rank != self._rank:
