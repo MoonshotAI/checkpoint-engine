@@ -889,8 +889,6 @@ class ParameterServer:
                         dist.destroy_process_group()
                         # HACK: wait 2s to ensure destroy is finished
                         time.sleep(2)
-                    if self._rank not in ranks:
-                        return
                     self.init_process_group_for_ranks(ranks)
                 if self._rank not in ranks:
                     return
