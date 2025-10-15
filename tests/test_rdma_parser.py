@@ -27,7 +27,9 @@ class TestNCCLIBHCAParser:
         """Test detection of _ibv_get_device_list function"""
         parser = NCCLIBHCAParser()
         real_ibv_list = (
-            os.listdir("/sys/class/infiniband") if os.path.exists("/sys/class/infiniband") else []
+            os.listdir("/sys/class/infiniband").sort()
+            if os.path.exists("/sys/class/infiniband")
+            else []
         )
         if real_ibv_list:
             assert parser.available_devices == real_ibv_list
@@ -87,7 +89,7 @@ class TestNCCLIBHCAParser:
         self, parser_with_mock_devices: NCCLIBHCAParser
     ):
         """Test exact matching with non-existent device"""
-        with patch("checkpoint_engine.rdma_parser.logger") as mock_logger:
+        with patch("checkpoint_engine.ps.logger") as mock_logger:
             result = parser_with_mock_devices.parse("=mlx5_100")
             assert result == []
             mock_logger.warning.assert_called_once_with(
@@ -128,7 +130,7 @@ class TestNCCLIBHCAParser:
 
     def test_parse_exclude_nonexistent_device(self, parser_with_mock_devices: NCCLIBHCAParser):
         """Test excluding non-existent device"""
-        with patch("checkpoint_engine.rdma_parser.logger") as mock_logger:
+        with patch("checkpoint_engine.ps.logger") as mock_logger:
             result = parser_with_mock_devices.parse("^mlx5_100")
             expected = parser_with_mock_devices.available_devices
             assert result == expected
@@ -225,7 +227,7 @@ class TestNCCLIBHCAParser:
 
     def test_resolve_device_specs_no_match(self, parser_with_mock_devices: NCCLIBHCAParser):
         """Test _resolve_device_specs with no matching devices"""
-        with patch("checkpoint_engine.rdma_parser.logger") as mock_logger:
+        with patch("checkpoint_engine.ps.logger") as mock_logger:
             result = parser_with_mock_devices._resolve_device_specs(["nonexistent"], False)
             assert result == []
             mock_logger.warning.assert_called_once_with(
@@ -236,7 +238,7 @@ class TestNCCLIBHCAParser:
         self, parser_with_mock_devices: NCCLIBHCAParser
     ):
         """Test _resolve_device_specs with exact match not found"""
-        with patch("checkpoint_engine.rdma_parser.logger") as mock_logger:
+        with patch("checkpoint_engine.ps.logger") as mock_logger:
             result = parser_with_mock_devices._resolve_device_specs(["nonexistent"], True)
             assert result == []
             mock_logger.warning.assert_called_once_with(
