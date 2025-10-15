@@ -271,63 +271,6 @@ def _get_ip() -> str:
         return socket.gethostbyname(socket.gethostname())
 
 
-def _ibv_get_device_list() -> list[str]:
-    lib = ctypes.CDLL("libibverbs.so.1")
-    lib.ibv_get_device_list.argtypes = [ctypes.POINTER(ctypes.c_int)]  # int *num_devices
-    lib.ibv_get_device_list.restype = ctypes.POINTER(ctypes.c_void_p)  # struct ibv_device **
-
-    lib.ibv_free_device_list.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
-    lib.ibv_get_device_name.argtypes = [ctypes.c_void_p]  # struct ibv_device *
-    lib.ibv_get_device_name.restype = ctypes.c_char_p  # const char *
-
-    num = ctypes.c_int()
-    dev_array = lib.ibv_get_device_list(ctypes.byref(num))
-    if not dev_array or num.value <= 0:
-        return []
-
-    devices = []
-    for i in range(num.value):
-        dev_ptr = dev_array[i]  # struct ibv_device *
-        name = lib.ibv_get_device_name(dev_ptr)  # const char *
-        devices.append(name.decode())
-    lib.ibv_free_device_list(dev_array)
-    return devices
-
-
-def _get_rdma_devices() -> list[str]:
-    """
-    use _ibv_get_device_list to get RDMA devices, if NCCL_IB_HCA has multiple values, just return
-    """
-    devices_str = os.getenv("PS_P2P_STORE_RDMA_DEVICES")
-    if devices_str:
-        return devices_str.split(",")
-    # if PS_P2P_STORE_RDMA_DEVICES is not set, try to use NCCL_IB_HCA to get RDMA devices
-    hca = os.getenv("NCCL_IB_HCA", None)
-    if hca:
-        hca_list = hca.split(",")
-        if len(hca_list) > 1:
-            # if NCCL_IB_HCA has multiple values, just return
-            return hca_list
-        else:
-            hca = hca_list[0]
-    return [device for device in sorted(_ibv_get_device_list()) if hca is None or hca in device]
-
-
-def _get_my_rdma_device(local_rank: int, gpu_count: int, devices: list[str]) -> str:
-    """
-    implement network card device allocation, if network card is "mlx5_0,mlx5_1", then 0-3 will share mlx5_0, 4-7 will share mlx5_1, etc.
-    """
-    if not devices:
-        raise RuntimeError("no rdma devices found")
-    assert len(devices) <= gpu_count, (
-        f"rdma devices count {len(devices)} should be less than or equal to gpu count {gpu_count}"
-    )
-    assert gpu_count % len(devices) == 0, (
-        f"gpu count {gpu_count} should be divisible by rdma devices count {len(devices)}"
-    )
-    return devices[local_rank // (gpu_count // len(devices))]
-
-
 def _load_checkpoint(files: list[str]) -> dict[str, torch.Tensor]:
     class TPMeta(BaseModel):
         concat_dim: int
@@ -525,6 +468,129 @@ def _get_master_port(master_port: int | None = None) -> int:
     return master_port
 
 
+class NCCLIBHCAParser:
+    def __init__(self):
+        self.max_hcas = 32
+        self.available_devices = self._ibv_get_device_list()
+        logger.info(f"Available RDMA Devices: {self.available_devices}")
+
+    def parse(self, value: str) -> list[str]:
+        if not value or value.strip() == "":
+            return self.available_devices[: self.max_hcas]
+
+        value = value.strip()
+        result = []
+        is_exclude = value.startswith("^")
+        is_exact_match = value.startswith("=")
+
+        cnt = 0
+        while value and value[0] in ("^", "=") and cnt < 2:
+            if value[0] == "^":
+                is_exclude = True
+            elif value[0] == "=":
+                is_exact_match = True
+            value = value[1:]
+            cnt += 1
+
+        device_specs = [spec.strip() for spec in value.split(",") if spec.strip()]
+
+        if is_exclude:
+            excluded_devices = self._resolve_device_specs(device_specs, is_exact_match)
+            for excluded in excluded_devices:
+                if excluded not in self.available_devices:
+                    logger.warning(f"device '{excluded}' not found in available devices.")
+                    excluded_devices.remove(excluded)
+            result = [dev for dev in self.available_devices if dev not in excluded_devices]
+        else:
+            result = self._resolve_device_specs(device_specs, is_exact_match)
+
+        if len(result) > self.max_hcas:
+            result = result[: self.max_hcas]
+
+        logger.info(f"RDMA Devices from 'NCCL_IB_HCA': {result}")
+
+        return result
+
+    def _resolve_device_specs(self, device_specs: list[str], is_exact_match: bool) -> list[str]:
+        devices = set()
+        for spec in device_specs:
+            device_name, port = (
+                map(str.strip, spec.split(":", 1)) if ":" in spec else (spec.strip(), None)
+            )
+            base_devices = (
+                [device_name]
+                if is_exact_match
+                else [dev for dev in self.available_devices if dev.startswith(device_name)]
+            )
+            if is_exact_match and device_name not in self.available_devices:
+                logger.warning(f"Device '{device_name}' not found in available devices.")
+                continue
+
+            if not base_devices:
+                logger.warning(f"No devices match the prefix '{device_name}'.")
+                continue
+
+            for base_dev in base_devices:
+                devices.add(f"{base_dev}:{port}" if port else f"{base_dev}")
+
+        return sorted(devices)
+
+    def _ibv_get_device_list(self) -> list[str]:
+        lib = ctypes.CDLL("libibverbs.so.1")
+        lib.ibv_get_device_list.argtypes = [ctypes.POINTER(ctypes.c_int)]  # int *num_devices
+        lib.ibv_get_device_list.restype = ctypes.POINTER(ctypes.c_void_p)  # struct ibv_device **
+
+        lib.ibv_free_device_list.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        lib.ibv_get_device_name.argtypes = [ctypes.c_void_p]  # struct ibv_device *
+        lib.ibv_get_device_name.restype = ctypes.c_char_p  # const char *
+
+        num = ctypes.c_int()
+        dev_array = lib.ibv_get_device_list(ctypes.byref(num))
+        if not dev_array or num.value <= 0:
+            return []
+
+        devices = []
+        for i in range(num.value):
+            dev_ptr = dev_array[i]  # struct ibv_device *
+            name = lib.ibv_get_device_name(dev_ptr)  # const char *
+            devices.append(name.decode())
+        lib.ibv_free_device_list(dev_array)
+        return devices
+
+    def _get_rdma_devices(self) -> list[str]:
+        """
+        use _ibv_get_device_list to get RDMA devices, if NCCL_IB_HCA has multiple values, just return
+        """
+        devices_str = os.getenv("PS_P2P_STORE_RDMA_DEVICES")
+        if devices_str:
+            return devices_str.split(",")
+        # if PS_P2P_STORE_RDMA_DEVICES is not set, try to use NCCL_IB_HCA to get RDMA devices
+        hca = os.getenv("NCCL_IB_HCA", None)
+
+        if hca:
+            hca_list = self.parse(hca)
+            if len(hca_list) > 1:
+                # if NCCL_IB_HCA has multiple values, just return
+                return hca_list
+            else:
+                hca = hca_list[0]
+        return [
+            device for device in sorted(self._ibv_get_device_list()) if hca is None or hca in device
+        ]
+
+    def _get_my_rdma_device(self, local_rank: int, gpu_count: int, devices: list[str]) -> str:
+        """
+        implement network card device allocation, if network card is "mlx5_0,mlx5_1", then 0-3 will share mlx5_0, 4-7 will share mlx5_1, etc.
+        if some NICs are down, causing the number of NICs is undivisible by the number of GPUs, assign the remaining GPUs to the closest NIC.
+        """
+        if not devices:
+            raise RuntimeError("no rdma devices found")
+        assert len(devices) <= gpu_count, (
+            f"rdma devices count {len(devices)} should be less than or equal to gpu count {gpu_count}"
+        )
+        return devices[local_rank // (gpu_count // len(devices))]
+
+
 class P2PStore:
     def __init__(self):
         from mooncake.engine import TransferEngine
@@ -532,7 +598,10 @@ class P2PStore:
         self.rank = int(os.getenv("RANK"))
         gpu_count = torch.cuda.device_count()
         local_rank = self.rank % gpu_count
-        device = _get_my_rdma_device(local_rank, gpu_count, _get_rdma_devices())
+        rdma_parser = NCCLIBHCAParser()
+        device = rdma_parser._get_my_rdma_device(
+            local_rank, gpu_count, rdma_parser._get_rdma_devices()
+        )
         self.ip = _get_ip()
 
         # we will start at most 8 ps processes, so we use 8 retries to avoid port conflicts in extreme cases
