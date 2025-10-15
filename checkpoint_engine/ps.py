@@ -303,14 +303,7 @@ def _get_rdma_devices() -> list[str]:
         return devices_str.split(",")
     # if PS_P2P_STORE_RDMA_DEVICES is not set, try to use NCCL_IB_HCA to get RDMA devices
     hca = os.getenv("NCCL_IB_HCA", None)
-    if hca:
-        hca_list = hca.split(",")
-        if len(hca_list) > 1:
-            # if NCCL_IB_HCA has multiple values, just return
-            return hca_list
-        else:
-            hca = hca_list[0]
-    return [device for device in sorted(_ibv_get_device_list()) if hca is None or hca in device]
+    return _parse_NCCL_IB_HCA(hca or "", _ibv_get_device_list()) or _ibv_get_device_list()
 
 
 def _get_my_rdma_device(local_rank: int, gpu_count: int, devices: list[str]) -> str:
@@ -326,6 +319,68 @@ def _get_my_rdma_device(local_rank: int, gpu_count: int, devices: list[str]) -> 
         f"gpu count {gpu_count} should be divisible by rdma devices count {len(devices)}"
     )
     return devices[local_rank // (gpu_count // len(devices))]
+
+
+def _parse_NCCL_IB_HCA(value: str, available_devices: list[str]) -> list[str]:
+    max_hcas = 32
+    if not value or value.strip() == "":
+        return available_devices[:max_hcas]
+
+    value = value.strip()
+    result = []
+    is_exclude = value.startswith("^")
+    is_exact_match = value.startswith("=")
+
+    cnt = 0
+    while value and value[0] in ("^", "=") and cnt < 2:
+        if value[0] == "^":
+            is_exclude = True
+        elif value[0] == "=":
+            is_exact_match = True
+        value = value[1:]
+        cnt += 1
+
+    device_specs = [spec.strip() for spec in value.split(",") if spec.strip()]
+
+    if is_exclude:
+        excluded_devices = _resolve_device_specs(device_specs, is_exact_match, available_devices)
+        result = [dev for dev in available_devices if dev not in excluded_devices]
+    else:
+        result = _resolve_device_specs(device_specs, is_exact_match, available_devices)
+
+    if len(result) > max_hcas:
+        result = result[:max_hcas]
+
+    logger.info(f"RDMA Devices from 'NCCL_IB_HCA': {result}")
+
+    return result
+
+
+def _resolve_device_specs(
+    device_specs: list[str], is_exact_match: bool, available_devices: list[str]
+) -> list[str]:
+    devices = set()
+    for spec in device_specs:
+        device_name, port = (
+            map(str.strip, spec.split(":", 1)) if ":" in spec else (spec.strip(), None)
+        )
+        base_devices = (
+            [device_name]
+            if is_exact_match
+            else [dev for dev in available_devices if dev.startswith(device_name)]
+        )
+        if is_exact_match and device_name not in available_devices:
+            logger.warning(f"Device '{device_name}' not found in available devices.")
+            continue
+
+        if not base_devices:
+            logger.warning(f"No devices match the prefix '{device_name}'.")
+            continue
+
+        for base_dev in base_devices:
+            devices.add(f"{base_dev}:{port}" if port else f"{base_dev}")
+
+    return sorted(devices)
 
 
 def _load_checkpoint(files: list[str]) -> dict[str, torch.Tensor]:
@@ -532,6 +587,7 @@ class P2PStore:
         self.rank = int(os.getenv("RANK"))
         gpu_count = torch.cuda.device_count()
         local_rank = self.rank % gpu_count
+        device = _get_my_rdma_device(local_rank, gpu_count, _get_rdma_devices())
         device = _get_my_rdma_device(local_rank, gpu_count, _get_rdma_devices())
         self.ip = _get_ip()
 
