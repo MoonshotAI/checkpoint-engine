@@ -588,7 +588,6 @@ class P2PStore:
         gpu_count = torch.cuda.device_count()
         local_rank = self.rank % gpu_count
         device = _get_my_rdma_device(local_rank, gpu_count, _get_rdma_devices())
-        device = _get_my_rdma_device(local_rank, gpu_count, _get_rdma_devices())
         self.ip = _get_ip()
 
         # we will start at most 8 ps processes, so we use 8 retries to avoid port conflicts in extreme cases
