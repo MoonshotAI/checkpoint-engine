@@ -11,7 +11,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from datetime import timedelta
 from functools import lru_cache
-from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, NamedTuple
 
 import httpx
 import numpy as np
@@ -530,8 +530,9 @@ def _gen_h2d_buckets(
     else:
         return _assign_receiver_ranks(buckets, actual_local_topo, remote_topo)
 
-
-T = TypeVar("T")
+if TYPE_CHECKING:
+    from typing import TypeVar
+    T = TypeVar("T")
 
 
 def _assign_receiver_ranks(
@@ -545,8 +546,6 @@ def _assign_receiver_ranks(
     Assign receiver ranks to buckets. If ranks is empty, assign the owner_rank as receiver_rank.
     GPU-rdma_device topology will be considered to make full use of the bandwidth.
     """
-    assert local_topo, "local_topo should not be empty"
-    assert remote_topo, "remote_topo should not be empty"
     if not buckets:
         logger.warning("bucket list is empty, no need to assign receiver ranks")
         return []
@@ -1092,9 +1091,6 @@ class ParameterServer:
         req_func: Callable[[list[tuple[str, str]]], None],
         ranks: list[int] | None = None,
     ):
-        logger.warning(
-            f"[rank{self._rank}] Using _update_per_bucket, which is an experimental feature."
-        )
         assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"
         assert dist.is_initialized(), "process group is not initialized"
         # if both ranks is None or [], it will use fully broadcast to update to all ranks
