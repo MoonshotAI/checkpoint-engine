@@ -530,8 +530,10 @@ def _gen_h2d_buckets(
     else:
         return _assign_receiver_ranks(buckets, actual_local_topo, remote_topo)
 
+
 if TYPE_CHECKING:
     from typing import TypeVar
+
     T = TypeVar("T")
 
 
@@ -576,9 +578,20 @@ def _assign_receiver_ranks(
     ]
 
     buckets_with_receiver = []
-    for i, (owner_rank, bucket) in enumerate(flattened_buckets):
-        receiver_rank = receiver_list[i % len(receiver_list)]
-        buckets_with_receiver.append((receiver_rank, owner_rank, bucket))
+    assigned_cnt = 0
+    while assigned_cnt < len(flattened_buckets):
+        occupied_devices = set()
+        for j in range(len(receiver_list)):
+            if assigned_cnt >= len(flattened_buckets):
+                break
+            owner_rank, bucket = flattened_buckets[assigned_cnt]
+            rdma_device = rank_to_rdma_device[owner_rank]
+            if rdma_device not in occupied_devices:
+                buckets_with_receiver.append((receiver_list[j], owner_rank, bucket))
+                occupied_devices.add(rdma_device)
+                assigned_cnt += 1
+            else:
+                break
 
     return buckets_with_receiver
 
