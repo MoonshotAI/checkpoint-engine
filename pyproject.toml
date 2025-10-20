@@ -158,3 +158,8 @@ inline-quotes = "double"
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
+
+[tool.pytest.ini_options]
+markers = [
+    "gpu: marks tests as GPU test (deselect with '-m \"not gpu\"')",
+]
