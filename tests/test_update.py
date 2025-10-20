@@ -1,7 +1,9 @@
 import os
 import random
+import subprocess
 import time
 
+import pytest
 import torch
 import zmq
 from torch.multiprocessing import Queue, get_context
@@ -63,9 +65,8 @@ def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Ten
         check_weights(names_to_check, socket_paths)
 
 
-def run():
+def run_with_specified_ranks(ranks: list[int]):
     rank = int(os.getenv("RANK"))
-    world_size = int(os.getenv("WORLD_SIZE"))
     ctx = get_context("spawn")
     queue = ctx.Queue()
     _device_uuid = _get_physical_gpu_id(rank)
@@ -76,14 +77,52 @@ def run():
     proc.start()
     ps.register_checkpoint(checkpoint_name, named_tensors=named_tensors)
     ps.gather_metas(checkpoint_name)
-    ranks_list = [[], list(range(world_size // 2)), [], list(range(world_size))]
-    for ranks in ranks_list:
-        ps.update(checkpoint_name, queue.put, ranks=ranks)
-        # sleep 3s to wait process group is destroyed
-        time.sleep(3)
+    ps.update(checkpoint_name, queue.put, ranks=ranks)
+    time.sleep(5)
     ps.unregister_checkpoint(checkpoint_name)
     queue.put(None)
     proc.join()
+
+
+def run():
+    world_size = int(os.getenv("WORLD_SIZE"))
+    random.seed(42)
+    ranklist = [
+        list(random.sample(range(world_size), k=num_ranks)) for num_ranks in range(world_size + 1)
+    ]
+    for ranks in ranklist:
+        run_with_specified_ranks(ranks)
+
+
+@pytest.mark.gpu
+def test_update():
+    world_size = torch.cuda.device_count()
+    assert world_size >= 2, "This test requires at least 2 GPUs."
+
+    master_addr = "localhost"
+    master_port = random.randint(20000, 30000)
+
+    cmd = [
+        "torchrun",
+        "--nproc_per_node",
+        str(world_size),
+        "--master_addr",
+        master_addr,
+        "--master_port",
+        str(master_port),
+        "tests/test_update.py",
+    ]
+
+    result = subprocess.run(
+        cmd,
+        capture_output=False,
+        text=True,
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        shell=False,
+        check=False,
+    )
+
+    assert result.returncode == 0
 
 
 if __name__ == "__main__":
