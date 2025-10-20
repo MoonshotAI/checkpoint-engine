@@ -161,6 +161,5 @@ ban-relative-imports = "all"
 
 [tool.pytest.ini_options]
 markers = [
-    "cpu: marks tests as CPU test (deselect with '-m \"not cpu\"')",
     "gpu: marks tests as GPU test (deselect with '-m \"not gpu\"')",
 ]

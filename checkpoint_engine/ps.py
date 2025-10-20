@@ -332,10 +332,10 @@ def _parse_NCCL_IB_HCA(value: str, available_devices: list[str]) -> list[str]:
     Please note that when '^' and '=' appear together, only '^=' is allowed, '=^' is not supported.
 
     Examples:
-    - NCCL_IB_HCA=mlx5: Use all cards starting with mlx5.
-    - NCCL_IB_HCA==mlx5_0,mlx5_1 : Use specific cards mlx5_0 and mlx5_1.
-    - NCCL_IB_HCA=^mlx5: Use all cards except those starting with mlx5.
-    - NCCL_IB_HCA=^=mlx5_0,mlx5_1: Use all cards except mlx5_0 and mlx5_1.
+    - `NCCL_IB_HCA="mlx5"`: Use all cards starting with `mlx5`.
+    - `NCCL_IB_HCA="=mlx5_0,mlx5_1"`: Use specific cards `mlx5_0` and `mlx5_1`.
+    - `NCCL_IB_HCA="^mlx5"`: Use all cards except those starting with `mlx5`.
+    - `NCCL_IB_HCA="^=mlx5_0,mlx5_1"`: Use all cards except `mlx5_0` and `mlx5_1`.
     """
     max_hcas = 32
     if not value or value.strip() == "":

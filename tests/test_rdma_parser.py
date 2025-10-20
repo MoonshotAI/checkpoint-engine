@@ -17,7 +17,6 @@ def mock_available_devices() -> list[str]:
     return ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"]
 
 
-@pytest.mark.cpu
 def test_detect_ibv_list():
     """Test detection of _ibv_get_device_list function"""
     # Skip this test if no real infiniband devices exist
@@ -30,7 +29,6 @@ def test_detect_ibv_list():
         assert isinstance(devices, list)
 
 
-@pytest.mark.cpu
 def test_parse_max_hcas_limit():
     """Test maximum HCA quantity limit"""
     # Create mock data with more than 32 devices
@@ -40,7 +38,6 @@ def test_parse_max_hcas_limit():
     assert result == many_devices[:32]
 
 
-@pytest.mark.cpu
 def test_get_rdma_devices_no_env_vars(mock_available_devices: list[str]):
     """Test _get_rdma_devices with no environment variables"""
     with (
@@ -51,7 +48,6 @@ def test_get_rdma_devices_no_env_vars(mock_available_devices: list[str]):
         assert sorted(devices) == sorted(mock_available_devices)
 
 
-@pytest.mark.cpu
 @pytest.mark.parametrize(
     "input_value,expected",
     [
@@ -74,7 +70,6 @@ def test_parse_basic_cases(
     assert result == expected
 
 
-@pytest.mark.cpu
 @pytest.mark.parametrize(
     "input_value,expected",
     [
@@ -105,7 +100,6 @@ def test_parse_various_patterns(
     assert result == expected
 
 
-@pytest.mark.cpu
 @pytest.mark.parametrize(
     "input_value,expected_result,expected_warning",
     [
@@ -133,7 +127,6 @@ def test_parse_exact_match_with_nonexistent_device(
         mock_logger.warning.assert_called_once_with(expected_warning)
 
 
-@pytest.mark.cpu
 @pytest.mark.parametrize(
     "env_var_name,env_var_value,expected_devices",
     [
@@ -161,7 +154,6 @@ def test_get_rdma_devices_with_env_vars(
         assert sorted(devices) == sorted(expected_devices)
 
 
-@pytest.mark.cpu
 @pytest.mark.parametrize(
     "local_rank,gpu_count,expected_device",
     [
@@ -179,7 +171,6 @@ def test_get_my_rdma_device_basic(local_rank: int, gpu_count: int, expected_devi
     assert device == expected_device
 
 
-@pytest.mark.cpu
 @pytest.mark.parametrize(
     "local_rank,gpu_count,devices,error",
     [
