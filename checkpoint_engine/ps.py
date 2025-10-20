@@ -678,6 +678,7 @@ class ParameterServer:
         self._all_hosts = []
         self._global_device_uuids: list[str] = []
         self._mem_fraction = mem_fraction or 0.9
+        self._logger_rank = 0
 
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
@@ -706,8 +707,8 @@ class ParameterServer:
         torch.cuda.set_device(device_index)
         self._device_uuid = _get_physical_gpu_id(device_index)
 
-    def _logger_rank0(self, msg: str):
-        if self._local_rank == 0:
+    def _logger_once(self, msg: str):
+        if self._local_rank == self._logger_rank:
             logger.info(msg)
 
     def get_metas(self) -> dict[int, MemoryBufferMetaList]:
@@ -871,10 +872,12 @@ class ParameterServer:
         try:
             # if both ranks is None or [], it will use fully broadcast to update to all ranks
             if not ranks:
+                self._logger_rank = 0
                 if self._auto_pg and not dist.is_initialized():
                     self.init_process_group()
                 self._update_per_bucket(checkpoint_name, req_func)
             else:
+                self._logger_rank = ranks[0]
                 if not self._auto_pg and self._rank not in ranks:
                     return
                 if self._auto_pg:
@@ -936,7 +939,7 @@ class ParameterServer:
                     max_tensor_bytes = max(max_tensor_bytes, _align_size(meta.dtype, meta.shape))
         free_bytes_divided_3 = free_bytes // (3 * _ALIGN_SIZE) * _ALIGN_SIZE
         if max_tensor_bytes <= free_bytes_divided_3 and not disable_h2d_buffer:
-            self._logger_rank0(f"[rank{self._rank}] use h2d buffer")
+            self._logger_once(f"[rank{self._rank}] use h2d buffer")
             # using h2d_buffer can make all ranks' h2d parallel execution
             # the cost is that we need to allocate extra h2d_buffer's GPU memory
             free_bytes = free_bytes_divided_3
@@ -944,7 +947,7 @@ class ParameterServer:
             # if the memory is not enough, it will fallback to disable_h2d_buffer mode,
             # at this time, the bandwidth will be limited by the h2d of a single machine,
             # but we can save GPU memory
-            self._logger_rank0(
+            self._logger_once(
                 f"[rank{self._rank}] disable h2d buffer when max_tensor_bytes {max_tensor_bytes} is larger than free_bytes {free_bytes} // 3"
             )
             free_bytes = free_bytes // (2 * _ALIGN_SIZE) * _ALIGN_SIZE
@@ -1074,7 +1077,7 @@ class ParameterServer:
         req_thread.start()
         socket.send_pyobj(handle)
         for gidx, (owner_rank, bucket) in enumerate(buckets):
-            self._logger_rank0(
+            self._logger_once(
                 f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} owner_rank {owner_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
             )
             _buffer = buffer[gidx % 2 * bucket_size : gidx % 2 * bucket_size + bucket.size]
@@ -1178,7 +1181,7 @@ class ParameterServer:
                     torch.cuda.memory_allocated() / 1024 / 1024,
                     torch.cuda.memory_reserved() / 1024 / 1024,
                 )
-                self._logger_rank0(
+                self._logger_once(
                     f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} owner_rank {owner_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
                     f"Current CUDA allocated {alloc:.2f} MB, "
                     f"reserved {reserved:.2f} MB."
