@@ -51,37 +51,40 @@ def test_get_rdma_devices_no_env_vars(mock_available_devices: list[str]):
 @pytest.mark.parametrize(
     "input_value,expected",
     [
-        ("", "mock_available_devices"),  # Special marker for fixture
-        ("   \t\n  ", "mock_available_devices"),  # Special marker for fixture
-        ("None", []),
-        ("^", "mock_available_devices"),  # Special marker for fixture
-        ("^=", "mock_available_devices"),
-        ("=^", "mock_available_devices"),
-        ("^^", "mock_available_devices"),
-        ("=", []),
-        ("==", []),
+        pytest.param("", ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"], id="empty string"),
+        pytest.param("   \t\n  ", ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"], id="whitespace"),
+        pytest.param("None", [], id="None string"),
+        pytest.param("^", ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"], id="caret"),
+        pytest.param("^=", ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"], id="caret-equals"),
+        pytest.param("=^", [], id="equals-caret"),
+        pytest.param("^^", ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"], id="double-caret"),
+        pytest.param("=", [], id="equals"),
+        pytest.param("==", [], id="double-equals"),
     ],
 )
-def test_parse_basic_cases(input_value: str, expected: str, mock_available_devices: list[str]):
+def test_parse_basic_cases(
+    input_value: str, expected: list[str], mock_available_devices: list[str]
+):
     """Test basic parsing cases: empty string, whitespace, None"""
     result = _parse_NCCL_IB_HCA(input_value, mock_available_devices)
-    if expected == "mock_available_devices":
-        assert result == mock_available_devices
-    else:
-        assert result == expected
+    assert result == expected
 
 
 @pytest.mark.parametrize(
     "input_value,expected",
     [
+        # prefix
         ("mlx5_0", ["mlx5_0"]),
         ("mlx5", ["mlx5_0", "mlx5_1"]),
+        # exact match
         ("=mlx5_0", ["mlx5_0"]),
         ("=mlx5_0,mlx5_1", ["mlx5_0", "mlx5_1"]),
-        ("mlx5_0:1,mlx5_1:2", ["mlx5_0:1", "mlx5_1:2"]),
-        ("mlx5_0:1,mlx5_1", ["mlx5_0:1", "mlx5_1"]),
+        # ignore ports, whitespace and duplicated commas
+        ("mlx5_0:1,mlx5_1:2", ["mlx5_0", "mlx5_1"]),
+        ("mlx5_0:1,mlx5_1", ["mlx5_0", "mlx5_1"]),
         (" mlx5_0 , mlx5_1 ", ["mlx5_0", "mlx5_1"]),
         ("mlx5_0,,mlx5_1", ["mlx5_0", "mlx5_1"]),
+        # exclusion
         ("^mlx5_0", ["mlx5_1", "mlx4_0", "mlx4_1"]),
         ("^mlx5_0,mlx5_1", ["mlx4_0", "mlx4_1"]),
         ("^mlx5", ["mlx4_0", "mlx4_1"]),
@@ -100,15 +103,15 @@ def test_parse_various_patterns(
 @pytest.mark.parametrize(
     "input_value,expected_result,expected_warning",
     [
-        ("=mlx5_100", [], "Device 'mlx5_100' not found in available devices."),
-        ("mlx5_100", [], "No devices match the prefix 'mlx5_100'."),
+        ("=mlx5_100", [], "No RDMA device match device_name='mlx5_100' where is_exact_match=True."),
+        ("mlx5_100", [], "No RDMA device match device_name='mlx5_100' where is_exact_match=False."),
         (
             "^mlx5_100",
             ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"],
-            "No devices match the prefix 'mlx5_100'.",
+            "No RDMA device match device_name='mlx5_100' where is_exact_match=False.",
         ),
-        ("mlx6", [], "No devices match the prefix 'mlx6'."),
-        ("=mlx6", [], "Device 'mlx6' not found in available devices."),
+        ("mlx6", [], "No RDMA device match device_name='mlx6' where is_exact_match=False."),
+        ("=mlx6", [], "No RDMA device match device_name='mlx6' where is_exact_match=True."),
     ],
 )
 def test_parse_exact_match_with_nonexistent_device(

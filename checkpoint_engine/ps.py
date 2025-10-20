@@ -322,6 +322,21 @@ def _get_my_rdma_device(local_rank: int, gpu_count: int, devices: list[str]) -> 
 
 
 def _parse_NCCL_IB_HCA(value: str, available_devices: list[str]) -> list[str]:
+    """
+    The acceptable value by NCCL_IB_HCA is documented in https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html#id8.
+    The Python version parser is referred to the CPP parser in NCCL: https://github.com/NVIDIA/nccl/blob/v2.28.3-1/src/transport/net_ib.cc#L658-L662.
+
+    The list is comma-separated; port numbers are NOT supported yet.
+    An optional prefix '^' indicates the list is an exclude list.
+    A second optional prefix '=' indicates that the tokens are exact names, otherwise by default NCCL would treat each token as a prefix.
+    Please note that when '^' and '=' appear together, only '^=' is allowed, '=^' is not supported.
+
+    Examples:
+    - NCCL_IB_HCA=mlx5: Use all cards starting with mlx5.
+    - NCCL_IB_HCA==mlx5_0,mlx5_1 : Use specific cards mlx5_0 and mlx5_1.
+    - NCCL_IB_HCA=^mlx5: Use all cards except those starting with mlx5.
+    - NCCL_IB_HCA=^=mlx5_0,mlx5_1: Use all cards except mlx5_0 and mlx5_1.
+    """
     max_hcas = 32
     if not value or value.strip() == "":
         return available_devices[:max_hcas]
@@ -329,14 +344,11 @@ def _parse_NCCL_IB_HCA(value: str, available_devices: list[str]) -> list[str]:
     value = value.strip()
     result = []
     is_exclude = value.startswith("^")
+    if is_exclude:
+        value = value.removeprefix("^")
     is_exact_match = value.startswith("=")
-
-    prefix_chars_processed = 0
-    while value and value[0] in ("^", "=") and prefix_chars_processed < 2:
-        value = value[1:]
-        is_exact_match = is_exact_match or value.startswith("=")
-        is_exclude = is_exclude or value.startswith("^")
-        prefix_chars_processed += 1
+    if is_exact_match:
+        value = value.removeprefix("=")
 
     device_specs = [spec.strip() for spec in value.split(",") if spec.strip()]
 
@@ -361,22 +373,22 @@ def _resolve_device_specs(
     for spec in device_specs:
         parts = spec.split(":", 1)
         device_name = parts[0].strip()
-        port = parts[1].strip() if len(parts) > 1 else None
+        # HACK: mooncake transfer engine does not support port specification yet, so we ignore it
+        # port = parts[1].strip() if len(parts) > 1 else None
         base_devices = (
             [device_name]
+            if device_name in available_devices
+            else []
             if is_exact_match
             else [dev for dev in available_devices if dev.startswith(device_name)]
         )
-        if is_exact_match and device_name not in available_devices:
-            logger.warning(f"Device '{device_name}' not found in available devices.")
-            continue
 
         if not base_devices:
-            logger.warning(f"No devices match the prefix '{device_name}'.")
+            logger.warning(f"No RDMA device match {device_name=} where {is_exact_match=}.")
             continue
 
         for base_dev in base_devices:
-            devices.add(f"{base_dev}:{port}" if port else f"{base_dev}")
+            devices.add(base_dev)
 
     return sorted(devices)
 
