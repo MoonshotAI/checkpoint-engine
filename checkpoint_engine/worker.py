@@ -4,6 +4,7 @@ from typing import TypedDict
 
 import torch
 import zmq
+from checkpoint_engine.ps import DeviceManager
 
 
 def _rebuild_ipc(handle: tuple[Callable, tuple], device_id: int | None = None) -> torch.Tensor:
@@ -53,13 +54,14 @@ def update_weights_from_ipc(
     socket = zmq_ctx.socket(zmq.REP)
     socket.connect(zmq_handle)
     buffer: torch.Tensor | None = None
+    device_mananger = DeviceManager()
     while True:
         payload: tuple[Callable, tuple] | list[FlattenedTensorMetadata] | None = socket.recv_pyobj()
         if payload is None:
             # means the update is done
             if post_hook is not None:
                 post_hook()
-            torch.cuda.synchronize()
+            device_mananger.device_module.synchronize()
             socket.send(b"")
             break
         if isinstance(payload, tuple):
@@ -71,13 +73,13 @@ def update_weights_from_ipc(
             continue
         assert isinstance(payload, list)
         run(_extract_weights(payload, buffer))
-        torch.cuda.synchronize()
+        device_mananger.device_module.synchronize()
         socket.send(b"")
 
     socket.close()
     del buffer
     gc.collect()
-    torch.cuda.empty_cache()
+    device_mananger.device_module.empty_cache()
 
 
 class VllmColocateWorkerExtension:
@@ -94,10 +96,18 @@ class VllmColocateWorkerExtension:
         from vllm.model_executor.model_loader.utils import process_weights_after_loading
         from vllm.platforms import current_platform
 
+        # vllm-ascend not init device
+        if current_platform.device_type == "npu" and self.device is None:
+            self.device = torch.device(f"npu:{self.local_rank}")
         assert self.device is not None
         if not hasattr(self, "_zmq_ctx") or self._zmq_ctx is None:
             self._zmq_ctx = zmq.Context()
-        device_uuid = current_platform.get_device_uuid(self.device.index)
+        if current_platform.device_type == "gpu":
+            device_uuid = current_platform.get_device_uuid(self.device.index)
+        elif current_platform.device_type == "npu":
+            device_uuid = (
+                f"NPU-{current_platform.get_device_name(self.device.index)!s}-{self.device.index}"
+            )
         update_weights_from_ipc(
             self._zmq_ctx,
             zmq_handles[device_uuid],
