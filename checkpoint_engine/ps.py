@@ -14,7 +14,6 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, NamedTuple
 
 import httpx
-import importlib
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -25,13 +24,21 @@ from safetensors.torch import safe_open
 from torch.multiprocessing.reductions import reduce_tensor
 
 
+def is_torch_npu_available() -> bool:
+    try:
+        if hasattr(torch, "npu") and callable(getattr(torch.npu, "is_available", None)):
+            return torch.npu.is_available()
+        return False
+    except ImportError:
+        return False
+
 class DeviceManager:
     def __init__(self):
         self.device_type = self._detect_device_type()
         self._setup_device_module()
 
     def _detect_device_type(self):
-        if importlib.util.find_spec("torch_npu") is not None:
+        if is_torch_npu_available():
             return "npu"
         elif torch.cuda.is_available():
             return "cuda"
@@ -277,7 +284,7 @@ def _concat_tp_weights(
 
 def _get_physical_gpu_id(device_manager: DeviceManager, device_index: int | None = None) -> str:
     try:
-        if importlib.util.find_spec("torch_npu") is not None:
+        if device_manager.device_type == "npu":
             return f"NPU-{device_manager.device_module.get_device_properties(device_index).name!s}-{device_index}"
         else:
             return f"GPU-{device_manager.device_module.get_device_properties(device_index).uuid!s}"
