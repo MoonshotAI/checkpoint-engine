@@ -643,17 +643,16 @@ def _assign_receiver_ranks(
     assigned_cnt = 0
     while assigned_cnt < len(flattened_buckets):
         occupied_devices = set()
-        for j in range(len(receiver_list)):
+        for receiver_rank in receiver_list:
             if assigned_cnt >= len(flattened_buckets):
                 break
             owner_rank, bucket = flattened_buckets[assigned_cnt]
             rdma_device = rank_to_rdma_device[owner_rank]
-            if rdma_device not in occupied_devices:
-                buckets_with_receiver.append((receiver_list[j], owner_rank, bucket))
-                occupied_devices.add(rdma_device)
-                assigned_cnt += 1
-            else:
+            if rdma_device in occupied_devices:
                 break
+            buckets_with_receiver.append((receiver_rank, owner_rank, bucket))
+            occupied_devices.add(rdma_device)
+            assigned_cnt += 1
 
     return buckets_with_receiver
 
