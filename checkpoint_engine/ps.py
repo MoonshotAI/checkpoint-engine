@@ -999,7 +999,7 @@ class ParameterServer:
             if self._auto_pg and (not ranks or self._rank in ranks):
                 dist.destroy_process_group()
 
-            torch.cuda.empty_cache()
+            self.device_manager.device_module.empty_cache()
 
     def _bind_zmq_socket(self) -> tuple[zmq.Socket, list[tuple[str, str]]]:
         def zmq_handle(device_uuid: str) -> str:
@@ -1268,7 +1268,7 @@ class ParameterServer:
                     )
                     ret_code = torch.tensor(1, device="cuda")
                 dist.all_reduce(ret_code, op=dist.ReduceOp.SUM)
-                torch.cuda.synchronize()
+                self.device_manager.device_module.synchronize()
                 if ret_code.item() != 0:
                     # quit early if any rank failed
                     socket.send_pyobj(None)
