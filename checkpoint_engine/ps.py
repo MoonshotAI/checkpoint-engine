@@ -1198,7 +1198,10 @@ class ParameterServer:
                 torch.cuda.synchronize()
                 if any(r != b"" for r in resp_list):
                     # quit early if any rank failed
-                    raise RuntimeError("failed to update weights due to remote error")
+                    failed_ranks = [i for i, r in enumerate(resp_list) if r != b""]
+                    raise RuntimeError(
+                        f"failed to update weights due to remote error(s) on rank(s): {failed_ranks}"
+                    )
                 dist.barrier()
                 socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
                 gidx += 1
