@@ -24,25 +24,27 @@ from safetensors.torch import safe_open
 from torch.multiprocessing.reductions import reduce_tensor
 
 
-def is_torch_npu_available() -> bool:
-    try:
-        if hasattr(torch, "npu") and callable(getattr(torch.npu, "is_available", None)):
-            return torch.npu.is_available()
-        else:
-            return False
-    except ImportError:
-        return False
-
 class DeviceManager:
     def __init__(self):
         self.device_type = self._detect_device_type()
         self._setup_device_module()
 
+    def _is_torch_npu_available(self) -> bool:
+        try:
+            if hasattr(torch, "npu") and callable(getattr(torch.npu, "is_available", None)):
+                return torch.npu.is_available()
+            else:
+                return False
+        except ImportError:
+            return False
+
     def _detect_device_type(self) -> str:
-        if is_torch_npu_available():
+        if self._is_torch_npu_available():
             return "npu"
         elif torch.cuda.is_available():
             return "cuda"
+        else:
+            raise TypeError("The current device type is not supported")
 
     def _setup_device_module(self):
         if self.device_type == "npu":
@@ -50,8 +52,11 @@ class DeviceManager:
             self.device_module = torch_npu.npu
         elif self.device_type == "cuda":
             self.device_module = torch.cuda
+        else:
+            raise TypeError("The current device type is not supported")
 
-    def get_backend(self) -> str:
+    @property
+    def backend(self) -> str:
         if self.device_type == "npu":
             return "hccl"
         elif self.device_type == "cuda":
@@ -283,10 +288,10 @@ def _concat_tp_weights(
     return torch.cat([w for w in tp_weights], dim=tp_concat_dim)
 
 
-def _get_physical_gpu_id(device_manager: DeviceManager, device_index: int | None = None) -> str:
+def _get_physical_gpu_id(device_manager: DeviceManager, rank_id: int, device_index: int | None = None) -> str:
     try:
         if device_manager.device_type == "npu":
-            return f"NPU-{device_manager.device_module.get_device_properties(device_index).name!s}-{device_index}"
+            return f"NPU-{device_manager.device_module.get_device_properties(device_index).name!s}-{rank_id}"
         else:
             return f"GPU-{device_manager.device_module.get_device_properties(device_index).uuid!s}"
     except AssertionError as e:
@@ -625,7 +630,7 @@ def _get_master_port(master_port: int | None = None) -> int:
 
 
 class P2PStore:
-    def __init__(self, device_manager: DeviceManager):
+    def __init__(self, device_manager : DeviceManager):
         from mooncake.engine import TransferEngine
 
         self.rank = int(os.getenv("RANK"))
@@ -742,7 +747,7 @@ class ParameterServer:
 
         device_index = self._local_rank
         self.device_manager.device_module.set_device(device_index)
-        self._device_uuid = _get_physical_gpu_id(self.device_manager, device_index)
+        self._device_uuid = _get_physical_gpu_id(self.device_manager, self._rank, device_index)
 
     def _logger_rank0(self, msg: str):
         if self._local_rank == 0:
@@ -880,7 +885,7 @@ class ParameterServer:
             is_master=self._rank == 0,
         )
         dist.init_process_group(
-            backend=self.device_manager.get_backend(),
+            backend=self.device_manager.backend,
             world_size=self._world_size,
             rank=self._rank,
             timeout=timeout,
