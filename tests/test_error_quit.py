@@ -1,7 +1,9 @@
 import os
 import random
+import subprocess
 import time
 
+import pytest
 import torch
 import zmq
 from torch.multiprocessing import Queue, get_context
@@ -50,7 +52,7 @@ def receiver_proc_with_error(
         )
 
     def error_run(weights: list[tuple[str, torch.Tensor]]):
-        weights = weights # Do some fake processing
+        weights = weights  # Do some fake processing
         time.sleep(random.uniform(0.1, 0.5))
         if random.random() < 0.6:
             raise RuntimeError("Intentional Error for testing.")
@@ -87,11 +89,45 @@ def run():
         # sleep 3s to wait process group is destroyed
         time.sleep(3)
     except RuntimeError as e:
-        print(f"[rank{rank}] Caught exception from worker process: {e}")
-        assert isinstance(e, RuntimeError)
+        print(f"[rank{rank}] Caught expected RuntimeError from worker process: {e}")
+        assert "failed to update weights due to remote error(s)" in str(e)
+    except Exception as e:
+        print(f"[rank{rank}] Caught unexpected exception: {e}")
+        raise
     finally:
         ps.unregister_checkpoint(checkpoint_name)
         queue.put(None)
+
+
+@pytest.mark.gpu
+def test_update():
+    world_size = torch.cuda.device_count()
+    assert world_size >= 2, "This test requires at least 2 GPUs."
+
+    master_addr = "localhost"
+    master_port = 25400
+
+    cmd = [
+        "torchrun",
+        "--nproc_per_node",
+        str(world_size),
+        "--master_addr",
+        master_addr,
+        "--master_port",
+        str(master_port),
+        "tests/test_error_quit.py",
+    ]
+
+    result = subprocess.run(
+        cmd,
+        capture_output=False,
+        text=True,
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        shell=False,
+        check=False,
+    )
+
+    assert result.returncode == 0
 
 
 if __name__ == "__main__":
