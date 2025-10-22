@@ -28,7 +28,8 @@ def is_torch_npu_available() -> bool:
     try:
         if hasattr(torch, "npu") and callable(getattr(torch.npu, "is_available", None)):
             return torch.npu.is_available()
-        return False
+        else:
+            return False
     except ImportError:
         return False
 
@@ -37,7 +38,7 @@ class DeviceManager:
         self.device_type = self._detect_device_type()
         self._setup_device_module()
 
-    def _detect_device_type(self):
+    def _detect_device_type(self) -> str:
         if is_torch_npu_available():
             return "npu"
         elif torch.cuda.is_available():
@@ -50,7 +51,7 @@ class DeviceManager:
         elif self.device_type == "cuda":
             self.device_module = torch.cuda
 
-    def get_backend(self):
+    def get_backend(self) -> str:
         if self.device_type == "npu":
             return "hccl"
         elif self.device_type == "cuda":
@@ -624,7 +625,7 @@ def _get_master_port(master_port: int | None = None) -> int:
 
 
 class P2PStore:
-    def __init__(self, device_manager):
+    def __init__(self, device_manager: DeviceManager):
         from mooncake.engine import TransferEngine
 
         self.rank = int(os.getenv("RANK"))
