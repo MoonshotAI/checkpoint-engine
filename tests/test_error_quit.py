@@ -50,7 +50,7 @@ def receiver_proc_with_error(
         )
 
     def error_run(weights: list[tuple[str, torch.Tensor]]):
-        weights = weights  # unused
+        weights = weights # Do some fake processing
         time.sleep(random.uniform(0.1, 0.5))
         if random.random() < 0.6:
             raise RuntimeError("Intentional Error for testing.")
@@ -61,7 +61,7 @@ def receiver_proc_with_error(
             break
         try:
             trigger_error(socket_paths)
-        except:
+        except RuntimeError:
             print(f"[rank{rank}] successfully triggered error.")
             raise
 
