@@ -1,5 +1,7 @@
 import os
 import random
+import subprocess
+import pytest
 import time
 
 import torch
@@ -86,12 +88,44 @@ def run():
         ps.update(checkpoint_name, queue.put, ranks=ranks)
         # sleep 3s to wait process group is destroyed
         time.sleep(3)
-    except RuntimeError as e:
+    except Exception as e:
         print(f"[rank{rank}] Caught exception from worker process: {e}")
         assert isinstance(e, RuntimeError)
+        assert "failed to update weights due to remote error(s)" in str(e)
     finally:
         ps.unregister_checkpoint(checkpoint_name)
         queue.put(None)
+
+
+@pytest.mark.gpu
+def test_update():
+    world_size = torch.cuda.device_count()
+    assert world_size >= 2, "This test requires at least 2 GPUs."
+
+    master_addr = "localhost"
+    master_port = random.randint(20000, 30000)
+
+    cmd = [
+        "torchrun",
+        "--nproc_per_node",
+        str(world_size),
+        "--master_addr",
+        master_addr,
+        "--master_port",
+        str(master_port),
+        "tests/test_error_quit.py",
+    ]
+
+    result = subprocess.run(
+        cmd,
+        capture_output=False,
+        text=True,
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        shell=False,
+        check=False,
+    )
+
+    assert result.returncode == 0
 
 
 if __name__ == "__main__":
