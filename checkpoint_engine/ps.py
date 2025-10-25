@@ -25,6 +25,8 @@ from torch.multiprocessing.reductions import reduce_tensor
 
 
 if TYPE_CHECKING:
+    from typing import TypeVar
+
     from typing_extensions import TypedDict
 
     class FileMeta(TypedDict):
@@ -33,6 +35,8 @@ if TYPE_CHECKING:
         shape: torch.Size
         type: type
         tp_concat_dim: int
+
+    T = TypeVar("T")
 
 
 def _dt_validate(value: Any) -> torch.dtype:
@@ -581,22 +585,15 @@ def _gen_h2d_buckets(
         assert buckets[-1][1].size > 0, (
             f"buckets[-1][1].size {buckets[-1][1].size} should be greater than 0"
         )
+    ranks_set = set(ranks) if ranks else set()
     actual_local_topo = (
-        {k: v & set(ranks) for k, v in local_topo.items() if v & set(ranks)}
-        if ranks
-        else local_topo
+        {k: v & ranks_set for k, v in local_topo.items() if v & ranks_set} if ranks else local_topo
     )
     # if ranks is empty, assign the owner_rank as receiver_rank, this is used for colocate architecture
     if not ranks:
         return [(owner_rank, owner_rank, bucket) for owner_rank, bucket in buckets]
     else:
         return _assign_receiver_ranks(buckets, actual_local_topo, remote_topo)
-
-
-if TYPE_CHECKING:
-    from typing import TypeVar
-
-    T = TypeVar("T")
 
 
 def _assign_receiver_ranks(
