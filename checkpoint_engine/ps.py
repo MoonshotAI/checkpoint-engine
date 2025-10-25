@@ -911,7 +911,11 @@ class ParameterServer:
                     rdma_device=metas_buckets.rdma_device,
                 )
                 num_parameters += sum(len(x.metas) for x in metas_buckets.memory_buffer_metas_list)
-            self._local_rdma_devices[metas_buckets.rdma_device + "@" + metas.host_ip].add(i)
+            self._local_rdma_devices[
+                metas_buckets.rdma_device + "@" + metas_buckets.p2p_store_addr.split(":")[0]
+                if metas_buckets.p2p_store_addr
+                else metas_buckets.host_ip
+            ].add(i)
         if not self._all_hosts:
             self._all_hosts = all_hosts
         if not self._global_device_uuids:
