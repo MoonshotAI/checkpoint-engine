@@ -4,7 +4,8 @@ from typing import TypedDict
 
 import torch
 import zmq
-from .ps import DeviceManager
+
+from checkpoint_engine.device_utils import DeviceManager, npu_generate_uuid
 
 
 def _rebuild_ipc(handle: tuple[Callable, tuple], device_id: int | None = None) -> torch.Tensor:
@@ -105,9 +106,8 @@ class VllmColocateWorkerExtension:
         if current_platform.device_type == "gpu":
             device_uuid = current_platform.get_device_uuid(self.device.index)
         elif current_platform.device_type == "npu":
-            device_uuid = (
-                f"NPU-{current_platform.get_device_name(self.device.index)!s}-{self.rank}"
-            )
+            serial_number = npu_generate_uuid()
+            device_uuid = f"NPU-{serial_number}"
         update_weights_from_ipc(
             self._zmq_ctx,
             zmq_handles[device_uuid],
