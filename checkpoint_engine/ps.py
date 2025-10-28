@@ -254,8 +254,7 @@ def _concat_tp_weights(
 def _get_physical_gpu_id(device_manager: DeviceManager, device_index: int | None = None) -> str:
     try:
         if device_manager.device_type == "npu":
-            serial_number = npu_generate_uuid()
-            return f"NPU-{serial_number}"
+            return f"NPU-{npu_generate_uuid()}"
         else:
             return f"GPU-{device_manager.device_module.get_device_properties(device_index).uuid!s}"
     except AssertionError as e:

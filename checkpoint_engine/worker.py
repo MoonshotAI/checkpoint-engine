@@ -106,8 +106,7 @@ class VllmColocateWorkerExtension:
         if current_platform.device_type == "gpu":
             device_uuid = current_platform.get_device_uuid(self.device.index)
         elif current_platform.device_type == "npu":
-            serial_number = npu_generate_uuid()
-            device_uuid = f"NPU-{serial_number}"
+            device_uuid = f"NPU-{npu_generate_uuid()}"
         update_weights_from_ipc(
             self._zmq_ctx,
             zmq_handles[device_uuid],
