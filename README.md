@@ -46,12 +46,12 @@ See [issue #25](https://github.com/MoonshotAI/checkpoint-engine/issues/25)
 
 | Model                                | Device Info  | GatherMetas | Update (Broadcast) | Update (P2P)            |
 | :----------------------------------- | :----------- | :---------- |:-------------------| :---------------------- |
-| GLM-4.5-Air (BF16)                   | 8xH800 TP8  | 0.12s       | 3.47s (1.42GiB)    | 4.12s (4.77GiB)         |
-| Qwen3-235B-A22B-Instruct-2507 (BF16) | 8xH800 TP8  | 0.33s       | 6.22s (2.69GiB)    | 7.10s (4.05GiB)        |
-| DeepSeek-V3.1 (FP8)                  | 16xH20 TP16  | 1.17s       | 10.46s (2.38GiB)   | 14.63s (3.61GiB)        |
-| Kimi-K2-Instruct (FP8)               | 16xH20 TP16  | 1.33s       | 14.51s (2.93GiB)   | 20.24s (4.46GiB)        |
-| DeepSeek-V3.1 (FP8)                  | 256xH20 TP16 | 0.94s       | 10.20s (2.54GiB)   | 13.82s (3.86 GiB) |
-| Kimi-K2-Instruct (FP8)               | 256xH20 TP16 | 1.24s       | 15.34s (2.99GiB)   | 19.69s (4.57 GiB) |
+| GLM-4.5-Air (BF16)                   | 8xH800 TP8   | 0.12s       | 3.47s (3.02GiB)    | 4.12s (3.02GiB)         |
+| Qwen3-235B-A22B-Instruct-2507 (BF16) | 8xH800 TP8   | 0.33s       | 6.22s (2.67GiB)    | 7.10s (2.68GiB)         |
+| DeepSeek-V3.1 (FP8)                  | 16xH20 TP16  | 1.17s       | 10.19s (5.39GiB)   | 11.80s (5.41GiB)        |
+| Kimi-K2-Instruct (FP8)               | 16xH20 TP16  | 1.33s       | 14.36s (5.89GiB)   | 17.49s (5.91GiB)        |
+| DeepSeek-V3.1 (FP8)                  | 256xH20 TP16 | 0.80s       | 11.33s (8.00GiB)   | 11.81s (8.00GiB)        |
+| Kimi-K2-Instruct (FP8)               | 256xH20 TP16 | 1.22s       | 16.04s (8.00GiB)   | 16.75s (8.00GiB)        |
 
 All results above are tested by [`examples/update.py`](./examples/update.py) and use [vLLM v0.10.2rc1](https://github.com/vllm-project/vllm/tree/v0.10.2rc1) as inference engine. Some notes:
 
@@ -147,6 +147,7 @@ Run a simple correctness test for checkpoint_engine
 torchrun --nproc-per-node 8 tests/test_update.py
 ```
 
+Other unit tests can be done with pytest.
 ## Limitations and Future Work
 
 - This project is currently only tested with vLLM. But it is easy to integrate with other frameworks like SGLang.
