@@ -2,8 +2,25 @@ import os
 import re
 import socket
 import subprocess
-
 import torch
+
+from functools import lru_cache
+from loguru import logger
+
+
+@lru_cache(maxsize=1)
+def get_ip() -> str:
+    try:
+        # try to get ip from network interface
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception as e:  # noqa: BLE001
+        # fallback to get ip from hostname
+        logger.warning(
+            f"fail to get ip from network interface, fallback to get ip from hostname: {e}"
+        )
+        return socket.gethostbyname(socket.gethostname())
 
 
 def npu_generate_uuid() -> str:
@@ -21,8 +38,7 @@ def npu_generate_uuid() -> str:
                 search_after_pid = str_result[str_result.find(str_pid) + len(str_pid) :]
                 match_chip_id = re.search(r"Chip ID[^\d]*(\d+)", search_after_pid)
                 chip_id = int(match_chip_id.group(1))
-                server_ip = socket.gethostbyname(socket.gethostname())
-                return f"{server_ip}-{npu_id * chip_count + chip_id}"
+                return f"{get_ip()}-{npu_id * chip_count + chip_id}"
         ValueError("The current process is not running on the npu device")
     except subprocess.CalledProcessError:
         ValueError("The current process is not running on the npu device")

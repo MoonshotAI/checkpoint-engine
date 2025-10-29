@@ -4,13 +4,11 @@ import ctypes
 import os
 import pickle
 import random
-import socket
 import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import timedelta
-from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, NamedTuple
 
 import httpx
@@ -23,7 +21,7 @@ from pydantic import BaseModel, PlainSerializer, PlainValidator, WithJsonSchema
 from safetensors.torch import safe_open
 from torch.multiprocessing.reductions import reduce_tensor
 
-from checkpoint_engine.device_utils import DeviceManager, npu_generate_uuid
+from checkpoint_engine.device_utils import DeviceManager, get_ip, npu_generate_uuid
 
 
 if TYPE_CHECKING:
@@ -259,21 +257,6 @@ def _get_physical_gpu_id(device_manager: DeviceManager, device_index: int | None
             return f"GPU-{device_manager.device_module.get_device_properties(device_index).uuid!s}"
     except AssertionError as e:
         raise ValueError(f"fail to get physical gpu id {device_index}") from e
-
-
-@lru_cache(maxsize=1)
-def _get_ip() -> str:
-    try:
-        # try to get ip from network interface
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-    except Exception as e:  # noqa: BLE001
-        # fallback to get ip from hostname
-        logger.warning(
-            f"fail to get ip from network interface, fallback to get ip from hostname: {e}"
-        )
-        return socket.gethostbyname(socket.gethostname())
 
 
 def _ibv_get_device_list() -> list[str]:
@@ -600,7 +583,7 @@ class P2PStore:
         gpu_count = device_manager.device_module.device_count()
         local_rank = self.rank % gpu_count
         device = _get_my_rdma_device(local_rank, gpu_count, _get_rdma_devices())
-        self.ip = _get_ip()
+        self.ip = get_ip()
 
         # we will start at most 8 ps processes, so we use 8 retries to avoid port conflicts in extreme cases
         retry_count = 8
@@ -792,7 +775,7 @@ class ParameterServer:
                 for x in self._memory_pool.get(checkpoint_name, [])
             ],
             p2p_store_addr=None if self._p2p_store is None else self._p2p_store.addr,
-            host_ip=_get_ip(),
+            host_ip=get_ip(),
             device_uuid=self._device_uuid,
         )
 
