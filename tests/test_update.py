@@ -1,13 +1,22 @@
+import json
 import os
 import random
+import subprocess
+import sys
 import time
+from contextlib import nullcontext
 
+import pytest
 import torch
 import zmq
 from torch.multiprocessing import Queue, get_context
 
 from checkpoint_engine.ps import ParameterServer, _get_physical_gpu_id
 from checkpoint_engine.worker import update_weights_from_ipc
+
+
+def get_world_size() -> int:
+    return torch.cuda.device_count()
 
 
 def gen_test_tensors(rank: int) -> list[tuple[str, torch.Tensor]]:
@@ -30,6 +39,39 @@ def gen_test_tensors(rank: int) -> list[tuple[str, torch.Tensor]]:
                 )
             )
     return tensors
+
+
+def checker_proc_with_error(
+    rank: int, device_uuid: str, named_tensors: dict[str, torch.Tensor], queue: Queue
+):
+    torch.cuda.set_device(rank)
+    named_tensors = {name: tensor.cuda() for name, tensor in named_tensors.items()}
+    _zmq_ctx = zmq.Context()
+
+    def trigger_error(socket_paths: list[tuple[str, str]]):
+        socket_paths = dict(socket_paths)
+        update_weights_from_ipc(
+            _zmq_ctx,
+            socket_paths[device_uuid],
+            device_id=rank,
+            run=error_run,
+            post_hook=lambda: torch.cuda.synchronize(),
+        )
+
+    def error_run(weights: list[tuple[str, torch.Tensor]]):
+        weights = weights  # Do some fake processing
+        time.sleep(random.uniform(0.1, 0.5))
+        if rank == 0:
+            raise RuntimeError("Intentional Error for testing.")
+
+    while True:
+        socket_paths: list[tuple[str, str]] = queue.get()
+        if socket_paths is None:
+            break
+        try:
+            trigger_error(socket_paths)
+        except RuntimeError as e:
+            assert str(e) == "Intentional Error for testing."
 
 
 def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Tensor], queue: Queue):
@@ -63,28 +105,119 @@ def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Ten
         check_weights(names_to_check, socket_paths)
 
 
-def run():
+def run(
+    checker_func: callable,
+    rank_list: list[list[int]],
+    need_error: bool = False,
+    expected_exception: Exception | None = None,
+    exception_msg: str | None = None,
+):
+    if need_error:
+        assert expected_exception is not None, (
+            "expected_exception must be provided when need_error is True."
+        )
+        assert exception_msg is not None, "exception_msg must be provided when need_error is True."
+    else:
+        assert expected_exception is None, (
+            "expected_exception must be None when need_error is False."
+        )
+        assert exception_msg is None, "exception_msg must be None when need_error is False."
+
     rank = int(os.getenv("RANK"))
-    world_size = int(os.getenv("WORLD_SIZE"))
     ctx = get_context("spawn")
     queue = ctx.Queue()
     _device_uuid = _get_physical_gpu_id(rank)
     ps = ParameterServer(auto_pg=True)
     named_tensors = dict(gen_test_tensors(rank))
     checkpoint_name = "test"
-    proc = ctx.Process(target=checker_proc, args=(rank, _device_uuid, named_tensors, queue))
+    proc = ctx.Process(
+        target=checker_func, args=(rank, _device_uuid, named_tensors, queue), daemon=True
+    )
     proc.start()
-    ps.register_checkpoint(checkpoint_name, named_tensors=named_tensors)
-    ps.gather_metas(checkpoint_name)
-    ranks_list = [[], list(range(world_size // 2)), [], list(range(world_size))]
-    for ranks in ranks_list:
-        ps.update(checkpoint_name, queue.put, ranks=ranks)
-        # sleep 3s to wait process group is destroyed
-        time.sleep(3)
+    with pytest.raises(expected_exception) if need_error else nullcontext() as e:
+        ps.register_checkpoint(checkpoint_name, named_tensors=named_tensors)
+        ps.gather_metas(checkpoint_name)
+        for ranks in rank_list:
+            ps.update(checkpoint_name, queue.put, ranks=ranks)
+            # sleep 3s to wait process group is destroyed
+            time.sleep(3)
+        if need_error:
+            pytest.fail("Test failed: Expected RuntimeError was not raised. Should not reach here.")
+    if need_error:
+        assert exception_msg in str(e.value)
     ps.unregister_checkpoint(checkpoint_name)
     queue.put(None)
     proc.join()
+    assert proc.exitcode == 0
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(
+    "test_name,rank_list",
+    [
+        (
+            "test_no_error",
+            [
+                list(range(get_world_size() // 2)),
+                list(range(get_world_size() // 2, get_world_size())),
+                [],
+                list(range(get_world_size())),
+            ],
+        ),
+        ("test_with_remote_error", [[]]),
+        # ("long_test_no_error", [list(random.sample(range(get_world_size()), k=num_ranks)) for num_ranks in range(get_world_size() + 1)]),
+    ],
+)
+def test_update(test_name: str, rank_list: list[list[int]] | None):
+    world_size = torch.cuda.device_count()
+    assert world_size >= 2, "This test requires at least 2 GPUs."
+    master_addr = "localhost"
+    master_port = 25400
+
+    cmd = [
+        "torchrun",
+        "--nproc_per_node",
+        str(world_size),
+        "--master_addr",
+        master_addr,
+        "--master_port",
+        str(master_port),
+        __file__,
+        test_name,
+        json.dumps(rank_list) if rank_list is not None else "[]",
+    ]
+
+    result = subprocess.run(  # noqa: S603
+        cmd,
+        capture_output=False,
+        text=True,
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        shell=False,
+        check=False,
+    )
+
+    assert result.returncode == 0
 
 
 if __name__ == "__main__":
-    run()
+    run_with_pytest = "PYTEST_CURRENT_TEST" in os.environ
+    if not run_with_pytest:
+        print("ERROR: This script is designed to run only through pytest!")
+        print("Please use: pytest test_update.py")
+        sys.exit(1)
+    assert len(sys.argv) > 2
+    test_type = sys.argv[1]
+    world_size = get_world_size()
+    rank_list = json.loads(sys.argv[2])
+    if test_type == "test_no_error" or test_type == "long_test_no_error":
+        run(checker_proc, rank_list, need_error=False)
+    elif test_type == "test_with_remote_error":
+        run(
+            checker_proc_with_error,
+            rank_list,
+            need_error=True,
+            expected_exception=RuntimeError,
+            exception_msg="Failed to update weights due to remote errors",
+        )
+    else:
+        raise ValueError(f"Unknown TEST_TYPE: {test_type}")
