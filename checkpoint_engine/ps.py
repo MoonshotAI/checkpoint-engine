@@ -1006,6 +1006,11 @@ class ParameterServer:
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} error {e}"
             )
             raise
+        finally:
+            if self._auto_pg and (not ranks or self._rank in ranks):
+                dist.destroy_process_group()
+
+            torch.cuda.empty_cache()
 
     def _bind_zmq_socket(self) -> tuple[zmq.Socket, list[tuple[str, str]]]:
         def zmq_handle(device_uuid: str) -> str:
@@ -1231,6 +1236,7 @@ class ParameterServer:
         socket.send_pyobj(handle)
 
         gidx = 0
+        ret_code = torch.tensor(0, device="cuda")
         bcast_rank_map = _get_bcast_rank_map(self._world_size, ranks)
         for i in range(max_len):
             if i < len(receiver_rank_buckets) and not disable_h2d_buffer:
@@ -1262,7 +1268,18 @@ class ParameterServer:
                         buffer_b.data.copy_(h2d_buffer[: bucket.size])
                 brank = bcast_rank_map[receiver_rank]
                 dist.broadcast(buffer_b, src=brank)
-                socket.recv()
+                resp = socket.recv()
+                if resp != b"":
+                    logger.error(
+                        f"[rank{self._rank}] receive error response from rank {receiver_rank} for bucket {gidx} in checkpoint {checkpoint_name}"
+                    )
+                    ret_code = torch.tensor(1, device="cuda")
+                dist.all_reduce(ret_code, op=dist.ReduceOp.SUM)
+                torch.cuda.synchronize()
+                if ret_code.item() != 0:
+                    # quit early if any rank failed
+                    socket.send_pyobj(None)
+                    raise RuntimeError("Failed to update weights due to remote errors")
                 dist.barrier()
                 socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
                 gidx += 1
