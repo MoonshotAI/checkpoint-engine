@@ -59,6 +59,7 @@ All results above are tested by [`examples/update.py`](./examples/update.py) and
 * Device Info: we tested various combination of devices and parallelism setups. For example, a 256-GPU TP16 setup means that we deploy 16 vLLM instances, each with 16-way tensor parallelism.
 * Since update duration is related to IPC bucket size, we provide the bucket size in the table.
 * The P2P time were tested for updating no more than two nodes (16 GPUs) (`ParameterServer.update(ranks=range(0, 16))`) out of the entire cluster.
+* We bind each GPU to its corresponding NUMA node to ensure stable H2D transfer speeds.
 
 ## Installation
 
