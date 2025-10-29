@@ -991,10 +991,6 @@ class ParameterServer:
                 if self._rank not in ranks:
                     return
                 self._update_per_bucket(checkpoint_name, req_func, ranks)
-            if self._auto_pg:
-                dist.destroy_process_group()
-
-            torch.cuda.empty_cache()
 
             logger.info(
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} done. "
