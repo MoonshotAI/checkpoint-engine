@@ -46,6 +46,7 @@ def checker_proc_with_error(
 ):
     torch.cuda.set_device(rank)
     named_tensors = {name: tensor.cuda() for name, tensor in named_tensors.items()}
+    _ = named_tensors
     _zmq_ctx = zmq.Context()
 
     def trigger_error(socket_paths: list[tuple[str, str]]):
@@ -59,7 +60,7 @@ def checker_proc_with_error(
         )
 
     def error_run(weights: list[tuple[str, torch.Tensor]]):
-        weights = weights  # Do some fake processing
+        _ = weights  # Do some fake processing
         time.sleep(random.uniform(0.1, 0.5))
         if rank == 0:
             raise RuntimeError("Intentional Error for testing.")
@@ -207,7 +208,6 @@ if __name__ == "__main__":
         sys.exit(1)
     assert len(sys.argv) > 2
     test_type = sys.argv[1]
-    world_size = get_world_size()
     rank_list = json.loads(sys.argv[2])
     if test_type == "test_no_error" or test_type == "long_test_no_error":
         run(checker_proc, rank_list, need_error=False)

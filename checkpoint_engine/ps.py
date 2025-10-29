@@ -1265,11 +1265,12 @@ class ParameterServer:
                 brank = bcast_rank_map[receiver_rank]
                 dist.broadcast(buffer_b, src=brank)
                 resp = socket.recv()
+                ret_code = torch.tensor(0, device="cuda")
                 if resp != b"":
                     logger.error(
                         f"[rank{self._rank}] receive error response from rank {receiver_rank} for bucket {gidx} in checkpoint {checkpoint_name}"
                     )
-                    ret_code = torch.tensor(1, device="cuda")
+                    ret_code.fill_(1)
                 dist.all_reduce(ret_code, op=dist.ReduceOp.SUM)
                 torch.cuda.synchronize()
                 if ret_code.item() != 0:
