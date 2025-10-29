@@ -73,9 +73,12 @@ def update_weights_from_ipc(
             socket.send(b"")
             continue
         assert isinstance(payload, list)
-        run(_extract_weights(payload, buffer))
-        device_mananger.device_module.synchronize()
-        socket.send(b"")
+        try:
+            run(_extract_weights(payload, buffer))
+            device_mananger.device_module.synchronize()
+            socket.send(b"")
+        except Exception as e:  # noqa: BLE001
+            socket.send_pyobj(e)
 
     socket.close()
     del buffer
