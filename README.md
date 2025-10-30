@@ -149,9 +149,52 @@ torchrun --nproc-per-node 8 tests/test_update.py
 ```
 
 Other unit tests can be done with pytest.
+## SGLang Integration
+
+Checkpoint Engine provides efficient distributed checkpoint loading for SGLang inference servers, significantly reducing model loading time for large models and multi-node setups.
+
+### Quick Start
+
+**1. Install checkpoint-engine:**
+```bash
+pip install 'checkpoint-engine[p2p]'
+```
+
+**2. Launch SGLang server:**
+```bash
+python -m sglang.launch_server \
+    --model-path $MODEL_PATH \
+    --tp 8 \
+    --load-format dummy \
+    --wait-for-initial-weights
+```
+
+**3. Run checkpoint engine:**
+```bash
+python -m sglang.srt.checkpoint_engine.update \
+    --update-method broadcast \
+    --checkpoint-path $MODEL_PATH \
+    --inference-parallel-size 8
+```
+
+### Multi-Node Setup
+
+For 2-node setup, run the same commands on both nodes with appropriate `--host` and distributed training parameters.
+
+### Key Options
+
+**SGLang Server:**
+- `--wait-for-initial-weights`: Wait for checkpoint engine before becoming ready
+- `--load-format dummy`: Enable overlapping initialization tasks
+
+**Checkpoint Engine:**
+- `--update-method`: Choose `broadcast`, `p2p`, or `all`
+- `--inference-parallel-size`: Number of parallel processes
+- `--checkpoint-path`: Model checkpoint directory
+
 ## Limitations and Future Work
 
-- This project is currently only tested with vLLM. But it is easy to integrate with other frameworks like SGLang.
+- This project is currently tested with vLLM and SGLang. Integration with other frameworks is planned for future releases.
 - The perfect three-stage pipeline mentioned in our paper is currently not implemented. This could be useful for architectures where H2D and broadcast do not conflict in PCIE.
 
 ## Acknowledgments
