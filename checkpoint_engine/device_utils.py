@@ -2,9 +2,9 @@ import os
 import re
 import socket
 import subprocess
-import torch
-
 from functools import lru_cache
+
+import torch
 from loguru import logger
 
 
