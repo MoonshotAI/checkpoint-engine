@@ -11,11 +11,13 @@ import torch
 import zmq
 from torch.multiprocessing import Queue, get_context
 
+from checkpoint_engine.device_utils import DeviceManager
 from checkpoint_engine.ps import ParameterServer, _get_physical_gpu_id
 from checkpoint_engine.worker import update_weights_from_ipc
-from checkpoint_engine.device_utils import DeviceManager
+
 
 device_manager = DeviceManager()
+
 
 def get_world_size() -> int:
     return device_manager.device_module.device_count()
@@ -47,7 +49,9 @@ def checker_proc_with_error(
     rank: int, device_uuid: str, named_tensors: dict[str, torch.Tensor], queue: Queue
 ):
     device_manager.device_module.set_device(rank)
-    named_tensors = {name: tensor.to(device_manager.device_type) for name, tensor in named_tensors.items()}
+    named_tensors = {
+        name: tensor.to(device_manager.device_type) for name, tensor in named_tensors.items()
+    }
     _ = named_tensors
     _zmq_ctx = zmq.Context()
 
@@ -79,7 +83,9 @@ def checker_proc_with_error(
 
 def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Tensor], queue: Queue):
     device_manager.device_module.set_device(rank)
-    named_tensors = {name: tensor.to(device_manager.device_type) for name, tensor in named_tensors.items()}
+    named_tensors = {
+        name: tensor.to(device_manager.device_type) for name, tensor in named_tensors.items()
+    }
     _zmq_ctx = zmq.Context()
 
     def check(names_to_check: dict[str, bool], weights: list[tuple[str, torch.Tensor]]):
