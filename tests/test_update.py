@@ -13,10 +13,12 @@ from torch.multiprocessing import Queue, get_context
 
 from checkpoint_engine.ps import ParameterServer, _get_physical_gpu_id
 from checkpoint_engine.worker import update_weights_from_ipc
+from checkpoint_engine.device_utils import DeviceManager
 
+device_manager = DeviceManager()
 
 def get_world_size() -> int:
-    return torch.cuda.device_count()
+    return device_manager.device_module.device_count()
 
 
 def gen_test_tensors(rank: int) -> list[tuple[str, torch.Tensor]]:
@@ -44,8 +46,8 @@ def gen_test_tensors(rank: int) -> list[tuple[str, torch.Tensor]]:
 def checker_proc_with_error(
     rank: int, device_uuid: str, named_tensors: dict[str, torch.Tensor], queue: Queue
 ):
-    torch.cuda.set_device(rank)
-    named_tensors = {name: tensor.cuda() for name, tensor in named_tensors.items()}
+    device_manager.device_module.set_device(rank)
+    named_tensors = {name: tensor.to(device_manager.device_type) for name, tensor in named_tensors.items()}
     _ = named_tensors
     _zmq_ctx = zmq.Context()
 
@@ -56,7 +58,7 @@ def checker_proc_with_error(
             socket_paths[device_uuid],
             device_id=rank,
             run=error_run,
-            post_hook=lambda: torch.cuda.synchronize(),
+            post_hook=lambda: device_manager.device_module.synchronize(),
         )
 
     def error_run(weights: list[tuple[str, torch.Tensor]]):
@@ -76,8 +78,8 @@ def checker_proc_with_error(
 
 
 def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Tensor], queue: Queue):
-    torch.cuda.set_device(rank)
-    named_tensors = {name: tensor.cuda() for name, tensor in named_tensors.items()}
+    device_manager.device_module.set_device(rank)
+    named_tensors = {name: tensor.to(device_manager.device_type) for name, tensor in named_tensors.items()}
     _zmq_ctx = zmq.Context()
 
     def check(names_to_check: dict[str, bool], weights: list[tuple[str, torch.Tensor]]):
@@ -94,7 +96,7 @@ def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Ten
             socket_paths[device_uuid],
             device_id=rank,
             run=lambda weights: check(names_to_check, weights),
-            post_hook=lambda: torch.cuda.synchronize(),
+            post_hook=lambda: device_manager.device_module.synchronize(),
         )
         assert all(names_to_check.values())
 
@@ -127,7 +129,7 @@ def run(
     rank = int(os.getenv("RANK"))
     ctx = get_context("spawn")
     queue = ctx.Queue()
-    _device_uuid = _get_physical_gpu_id(rank)
+    _device_uuid = _get_physical_gpu_id(device_manager, rank)
     ps = ParameterServer(auto_pg=True)
     named_tensors = dict(gen_test_tensors(rank))
     checkpoint_name = "test"
@@ -170,7 +172,7 @@ def run(
     ],
 )
 def test_update(test_name: str, rank_list: list[list[int]] | None):
-    world_size = torch.cuda.device_count()
+    world_size = device_manager.device_module.device_count()
     assert world_size >= 2, "This test requires at least 2 GPUs."
     master_addr = "localhost"
     master_port = 25400
@@ -209,7 +211,7 @@ if __name__ == "__main__":
     assert len(sys.argv) > 2
     test_type = sys.argv[1]
     rank_list = json.loads(sys.argv[2])
-    if test_type == "test_no_error" or test_type == "long_test_no_error":
+    if test_type == "test_no_error":
         run(checker_proc, rank_list, need_error=False)
     elif test_type == "test_with_remote_error":
         run(
