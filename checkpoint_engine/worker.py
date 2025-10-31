@@ -57,10 +57,13 @@ def update_weights_from_ipc(
     buffer: torch.Tensor | None = None
     device_mananger = DeviceManager()
     while True:
-        payload: tuple[Callable, tuple] | list[FlattenedTensorMetadata] | None = socket.recv_pyobj()
-        if payload is None:
-            # means the update is done
-            if post_hook is not None:
+        payload: tuple[Callable, tuple] | list[FlattenedTensorMetadata] | None | Exception = (
+            socket.recv_pyobj()
+        )
+        if payload is None or isinstance(payload, Exception):
+            # means the update is done or error occurred
+            # only call post_hook if update is successful
+            if post_hook is not None and not isinstance(payload, Exception):
                 post_hook()
             device_mananger.device_module.synchronize()
             socket.send(b"")
@@ -73,9 +76,12 @@ def update_weights_from_ipc(
             socket.send(b"")
             continue
         assert isinstance(payload, list)
-        run(_extract_weights(payload, buffer))
-        device_mananger.device_module.synchronize()
-        socket.send(b"")
+        try:
+            run(_extract_weights(payload, buffer))
+            device_mananger.device_module.synchronize()
+            socket.send(b"")
+        except Exception as e:  # noqa: BLE001
+            socket.send_pyobj(e)
 
     socket.close()
     del buffer
