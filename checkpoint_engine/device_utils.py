@@ -39,9 +39,9 @@ def npu_generate_uuid() -> str:
                 match_chip_id = re.search(r"Chip ID[^\d]*(\d+)", search_after_pid)
                 chip_id = int(match_chip_id.group(1))
                 return f"{get_ip()}-{npu_id * chip_count + chip_id}"
-        ValueError("The current process is not running on the npu device")
-    except subprocess.CalledProcessError:
-        ValueError("The current process is not running on the npu device")
+        raise ValueError("The current process is not running on the npu device")
+    except subprocess.CalledProcessError as e:
+        raise ValueError("The current process is not running on the npu device") from e
 
 
 class DeviceManager:
@@ -82,3 +82,5 @@ class DeviceManager:
             return "hccl"
         elif self.device_type == "cuda":
             return "nccl"
+        else:
+            raise TypeError("The current device type is not supported")
