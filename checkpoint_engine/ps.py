@@ -989,11 +989,6 @@ class ParameterServer:
                     return
                 self._update_per_bucket(checkpoint_name, req_func, ranks)
 
-            logger.info(
-                f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} done. "
-                f"Current device allocated {self.device_manager.device_module.memory_allocated() / 1024 / 1024} MB, "
-                f"reserved {self.device_manager.device_module.memory_reserved() / 1024 / 1024} MB."
-            )
         except Exception as e:
             logger.exception(
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} error {e}"
@@ -1004,6 +999,11 @@ class ParameterServer:
                 dist.destroy_process_group()
 
             self.device_manager.device_module.empty_cache()
+            logger.info(
+                f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} done. "
+                f"Current device allocated {self.device_manager.device_module.memory_allocated() / 1024 / 1024} MB, "
+                f"reserved {self.device_manager.device_module.memory_reserved() / 1024 / 1024} MB."
+            )
 
     def _bind_zmq_socket(self) -> tuple[zmq.Socket, list[tuple[str, str]]]:
         def zmq_handle(device_uuid: str) -> str:
@@ -1233,7 +1233,7 @@ class ParameterServer:
         socket.send_pyobj(handle)
 
         gidx = 0
-        ret_code = torch.tensor(0, device=self.device_manager.device_type)
+        ret_code = torch.zeros((), device=self.device_manager.device_type, dtype=torch.int64)
         bcast_rank_map = _get_bcast_rank_map(self._world_size, ranks)
         for i in range(max_len):
             if i < len(receiver_rank_buckets) and not disable_h2d_buffer:
@@ -1276,8 +1276,9 @@ class ParameterServer:
                 self.device_manager.device_module.synchronize()
                 if ret_code.item() != 0:
                     # quit early if any rank failed
-                    socket.send_pyobj(RuntimeError("Failed to update weights due to remote errors"))
-                    raise RuntimeError("Failed to update weights due to remote errors")
+                    exception = RuntimeError("Failed to update weights due to remote errors")
+                    socket.send_pyobj(exception)
+                    raise exception
                 socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
                 gidx += 1
 

@@ -82,7 +82,7 @@ def checker_proc_with_error(
         try:
             trigger_error(socket_paths)
         except RuntimeError as e:
-            assert str(e) == "Intentional Error for testing."
+            assert str(e) == "Failed to update weights due to remote errors"
 
 
 def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Tensor], queue: Queue):
