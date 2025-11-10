@@ -67,8 +67,6 @@ def update_weights_from_ipc(
                 post_hook()
             device_mananger.device_module.synchronize()
             socket.send(b"")
-            if isinstance(payload, Exception):
-                raise payload
             break
         if isinstance(payload, tuple):
             # an ipc handle that vLLM can use `func, args = handle`
@@ -89,6 +87,8 @@ def update_weights_from_ipc(
     del buffer
     gc.collect()
     device_mananger.device_module.empty_cache()
+    if isinstance(payload, Exception):
+        raise payload
 
 
 class VllmColocateWorkerExtension:
