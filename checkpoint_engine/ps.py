@@ -753,7 +753,7 @@ class ParameterServer:
         Args:
             auto_pg: Whether to automatically initialize the process group.
                 Notice that if auto_pg is True, will destroy the process group after update.
-            mem_fraction: The proportion (as a fraction) of the current free CUDA memory for allocation.
+            mem_fraction: The proportion (as a fraction) of the current free device memory for allocation.
         """
         self._rank = rank or int(os.environ.get("RANK", None))
         self._world_size = world_size or int(os.environ.get("WORLD_SIZE", None))
@@ -988,14 +988,10 @@ class ParameterServer:
                 if self._rank not in ranks:
                     return
                 self._update_per_bucket(checkpoint_name, req_func, ranks)
-            if self._auto_pg:
-                dist.destroy_process_group()
-
-            self.device_manager.device_module.empty_cache()
 
             logger.info(
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} done. "
-                f"Current CUDA allocated {self.device_manager.device_module.memory_allocated() / 1024 / 1024} MB, "
+                f"Current device allocated {self.device_manager.device_module.memory_allocated() / 1024 / 1024} MB, "
                 f"reserved {self.device_manager.device_module.memory_reserved() / 1024 / 1024} MB."
             )
         except Exception as e:
@@ -1003,6 +999,11 @@ class ParameterServer:
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} error {e}"
             )
             raise
+        finally:
+            if self._auto_pg and (not ranks or self._rank in ranks):
+                dist.destroy_process_group()
+
+            self.device_manager.device_module.empty_cache()
 
     def _bind_zmq_socket(self) -> tuple[zmq.Socket, list[tuple[str, str]]]:
         def zmq_handle(device_uuid: str) -> str:
@@ -1019,7 +1020,7 @@ class ParameterServer:
         # auto detect bucket size
         tensor = torch.tensor(
             [
-                # proportion of current cuda free memory bytes
+                # proportion of current device free memory bytes
                 int(
                     float(self.device_manager.device_module.mem_get_info()[0]) * self._mem_fraction
                 ),
@@ -1183,7 +1184,7 @@ class ParameterServer:
 
             if not need_update:
                 return
-            # first execute a barrier to avoid subsequent cuda oom
+            # first execute a barrier to avoid subsequent device oom
             dist.barrier()
 
         bucket_size, disable_h2d_buffer = self._detect_bucket_size()
@@ -1232,6 +1233,7 @@ class ParameterServer:
         socket.send_pyobj(handle)
 
         gidx = 0
+        ret_code = torch.tensor(0, device=self.device_manager.device_type)
         bcast_rank_map = _get_bcast_rank_map(self._world_size, ranks)
         for i in range(max_len):
             if i < len(receiver_rank_buckets) and not disable_h2d_buffer:
@@ -1251,7 +1253,7 @@ class ParameterServer:
                 )
                 self._logger_rank0(
                     f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} receiver_rank {receiver_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
-                    f"Current CUDA allocated {alloc:.2f} MB, "
+                    f"Current device allocated {alloc:.2f} MB, "
                     f"reserved {reserved:.2f} MB."
                 )
                 start = gidx % 2 * bucket_size
@@ -1263,8 +1265,19 @@ class ParameterServer:
                         buffer_b.data.copy_(h2d_buffer[: bucket.size])
                 brank = bcast_rank_map[receiver_rank]
                 dist.broadcast(buffer_b, src=brank)
-                socket.recv()
-                dist.barrier()
+                resp = socket.recv()
+                if resp != b"":
+                    exception_obj = pickle.loads(resp)
+                    logger.error(
+                        f"[rank{self._rank}] receive error response '{type(exception_obj).__name__}: {exception_obj}' from rank {receiver_rank} for bucket {gidx} in checkpoint {checkpoint_name}"
+                    )
+                    ret_code.fill_(1)
+                dist.all_reduce(ret_code, op=dist.ReduceOp.SUM)
+                self.device_manager.device_module.synchronize()
+                if ret_code.item() != 0:
+                    # quit early if any rank failed
+                    socket.send_pyobj(RuntimeError("Failed to update weights due to remote errors"))
+                    raise RuntimeError("Failed to update weights due to remote errors")
                 socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
                 gidx += 1
 
