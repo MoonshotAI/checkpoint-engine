@@ -1031,6 +1031,25 @@ class ParameterServer:
         )
         logger.info(f"[rank{self._rank}] init process group successfully.")
 
+    def store_based_barrier(self, store: dist.TCPStore) -> None:
+        """
+        Perform a store-based barrier synchronization across all ranks.
+
+        This barrier uses a TCP store directly rather than a process group,
+        allowing all ranks to synchronize regardless of which process group
+        they belong to.
+
+        Args:
+            store: The TCPStore instance to use for synchronization.
+        """
+        dist.distributed_c10d._store_based_barrier(
+            rank=self._rank,
+            store=store,
+            group_name="parameter_server_barrier",
+            rendezvous_count=self._world_size,
+            timeout=timedelta(minutes=5),
+        )
+
     def update(
         self,
         checkpoint_name: str,
@@ -1050,42 +1069,31 @@ class ParameterServer:
                 which is useful in disaggregated architecture.
         """
         assert req_func is not None, "req_func is required"
+        ranks_group = None
         try:
+            master_addr = os.getenv("MASTER_ADDR")
+            assert master_addr, "master_addr is required"
+
+            # HACK: MASTER_PORT+1 for main process group, MASTER_PORT+2 for barrier store
             manager_store = dist.TCPStore(
-                os.getenv("MASTER_ADDR"),
+                master_addr,
                 _get_master_port() + 1,
                 self._world_size,
                 timeout=timedelta(minutes=10),
                 is_master=self._rank == 0,
             )
+
+            if self._auto_pg and not dist.is_initialized():
+                self.init_process_group()
+
             # if both ranks is None or [], it will use fully broadcast to update to all ranks
+            ranks_group = dist.new_group(ranks if ranks else None)
             if not ranks:
-                if self._auto_pg and not dist.is_initialized():
-                    self.init_process_group()
-                ranks_group = dist.new_group()
-                self._update_per_bucket(checkpoint_name, req_func, ranks_group, ranks)
+                self._update_per_bucket(checkpoint_name, req_func, ranks_group)
             else:
-                if self._auto_pg:
-                    if dist.is_initialized():
-                        dist.destroy_process_group()
-                        # HACK: wait 2s to ensure destroy is finished
-                        time.sleep(2)
-                    self.init_process_group()
-                ranks_group = dist.new_group(ranks)
-                logger.info(
-                    f"[rank{self._rank}] default pg: {dist.group.WORLD}, ranks group: {ranks_group}"
-                )
                 self._update_per_bucket(checkpoint_name, req_func, ranks_group, ranks)
 
-            dist.distributed_c10d._store_based_barrier(
-                rank=self._rank,
-                store=manager_store,
-                group_name="manager_store_barrier",
-                rendezvous_count=self._world_size,
-                timeout=timedelta(minutes=5),
-            )
-            dist.destroy_process_group(ranks_group)
-            del ranks_group
+            self.store_based_barrier(manager_store)
 
         except Exception as e:
             logger.exception(
@@ -1093,9 +1101,10 @@ class ParameterServer:
             )
             raise
         finally:
-            if self._auto_pg and (not ranks or self._rank in ranks):
+            if ranks_group:
+                dist.destroy_process_group(ranks_group)
+            if self._auto_pg and dist.is_initialized():
                 dist.destroy_process_group()
-
             self.device_manager.device_module.empty_cache()
             logger.info(
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} done. "
@@ -1228,7 +1237,6 @@ class ParameterServer:
     ):
         assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"
         assert dist.is_initialized(), "process group is not initialized"
-        assert ranks_group is not None, "ranks_group should be set"
 
         # if both ranks is None or [], it will use fully broadcast to update to all ranks
         if not ranks:
