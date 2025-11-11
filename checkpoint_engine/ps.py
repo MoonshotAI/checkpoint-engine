@@ -1287,6 +1287,7 @@ def _init_api(ps: ParameterServer) -> Any:
         update_url: str | None = None
         inference_group_ranks: list[int] = []
         timeout: float = 300.0
+        uds: str | None = None
 
     def wrap_exception(func: Callable[[], None]) -> Response:
         try:
@@ -1319,7 +1320,9 @@ def _init_api(ps: ParameterServer) -> Any:
                 return
             if req.inference_group_ranks:
                 socket_paths = [socket_paths[i] for i in req.inference_group_ranks]
-            request_inference_to_update(req.update_url, dict(socket_paths), timeout=req.timeout)
+            request_inference_to_update(
+                req.update_url, dict(socket_paths), timeout=req.timeout, uds=req.uds
+            )
 
         return wrap_exception(lambda: ps.update(checkpoint_name, update_func, ranks=req.ranks))
 
