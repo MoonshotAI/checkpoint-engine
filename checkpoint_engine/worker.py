@@ -55,40 +55,44 @@ def update_weights_from_ipc(
     socket = zmq_ctx.socket(zmq.REP)
     socket.connect(zmq_handle)
     buffer: torch.Tensor | None = None
-    device_mananger = DeviceManager()
-    while True:
-        payload: tuple[Callable, tuple] | list[FlattenedTensorMetadata] | None | Exception = (
-            socket.recv_pyobj()
-        )
-        if payload is None or isinstance(payload, Exception):
-            # means the update is done or error occurred
-            # only call post_hook if update is successful
-            if post_hook is not None and not isinstance(payload, Exception):
-                post_hook()
-            device_mananger.device_module.synchronize()
-            socket.send(b"")
-            break
-        if isinstance(payload, tuple):
-            # an ipc handle that vLLM can use `func, args = handle`
-            # and `func(*args)` to rebuild GPU tensor.
-            buffer = _rebuild_ipc(payload, device_id)
-            assert buffer.dtype == torch.uint8
-            socket.send(b"")
-            continue
-        assert isinstance(payload, list)
-        try:
-            run(_extract_weights(payload, buffer))
-            device_mananger.device_module.synchronize()
-            socket.send(b"")
-        except Exception as e:  # noqa: BLE001
-            socket.send_pyobj(e)
+    device_manager = DeviceManager()
+    try:
+        ipc_handle: tuple[Callable, tuple] = socket.recv_pyobj()
+        assert isinstance(ipc_handle, tuple)
+        buffer = _rebuild_ipc(ipc_handle, device_id)
+        socket.send(b"")
+    except Exception as e:
+        socket.send_pyobj(e)
+        socket.recv()  # wait for ack
+        raise
+    try:
+        while True:
+            payload: list[FlattenedTensorMetadata] | Exception | None = socket.recv_pyobj()
+            if payload is None:  # done signal
+                if post_hook is not None:
+                    post_hook()
+                device_manager.device_module.synchronize()
+                socket.send(b"")
+                break
+            if isinstance(payload, list):  # still updating weights
+                try:
+                    run(_extract_weights(payload, buffer))
+                    device_manager.device_module.synchronize()
+                    socket.send(b"")
+                except Exception as e:  # noqa: BLE001
+                    socket.send_pyobj(e)
+            elif isinstance(
+                payload, Exception
+            ):  # error occurred, got force quit signal from Parameter Server
+                raise payload
+            else:
+                raise TypeError(f"Unexpected payload type: {type(payload)}")
 
-    socket.close()
-    del buffer
-    gc.collect()
-    device_mananger.device_module.empty_cache()
-    if isinstance(payload, Exception):
-        raise payload
+    finally:
+        socket.close()
+        del buffer
+        gc.collect()
+        device_manager.device_module.empty_cache()
 
 
 class VllmColocateWorkerExtension:
