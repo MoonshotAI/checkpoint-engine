@@ -85,15 +85,45 @@ def update_weights_from_ipc(
 
 class VllmColocateWorkerExtension:
     """
-    The class for vLLM's worker to inherit from, in the colocate setting.
-    By defining an extension class, the code can work no matter what is
-    the underlying worker class. This way, the code can be compatible
-    with both vLLM V0 and V1.
-    NOTE: we define this class in a separate module, and the main module
-    should pass the full qualified name as `worker_extension_cls` argument.
+    Worker extension for vLLM to update weights from checkpoint-engine.
+
+    This class provides a worker extension mechanism that allows vLLM workers to receive
+    and apply weight updates from the checkpoint-engine via IPC (Inter-Process Communication).
+    The methods in this worker extension will be injected into the vLLM worker class and
+    are callable from the `collective_rpc` API, enabling seamless weight updates for both
+    vLLM V0 and V1 versions.
+
+    Note:
+        This class is defined in a separate module. The fully qualified name
+        `checkpoint_engine.worker.VllmColocateWorkerExtension` should be passed as the
+        `worker_extension_cls` argument when initializing the vLLM worker.
     """
 
     def update_weights_from_ipc(self, zmq_handles: dict[str, str]):
+        """
+        Update model weights from checkpoint-engine via IPC communication.
+
+        This method establishes a ZMQ connection to the checkpoint-engine and receives
+        weight updates through a shared memory buffer. The update process includes:
+        1. Receiving IPC handles to reconstruct shared memory tensors
+        2. Extracting flattened metadata describing tensor weights in the shared memory tensor
+        3. Loading weights into the model
+        4. Post-processing weights after loading
+
+        Args:
+            zmq_handles: A dictionary mapping device UUIDs to ZMQ socket handles.
+                        The device UUID is platform-specific:
+                        - For CUDA: UUID from `current_platform.get_device_uuid()`
+                        - For NPU: Format "NPU-{generated_uuid}"
+
+        Raises:
+            ValueError: If the device type is not supported (not CUDA or NPU).
+            AssertionError: If the device is not properly initialized.
+
+        Note:
+            This method is called by vLLM's collective RPC mechanism. The ZMQ context
+            is lazily initialized on first call and reused for subsequent updates.
+        """
         from vllm.model_executor.model_loader.utils import process_weights_after_loading
         from vllm.platforms import current_platform
 
@@ -103,10 +133,12 @@ class VllmColocateWorkerExtension:
         assert self.device is not None
         if not hasattr(self, "_zmq_ctx") or self._zmq_ctx is None:
             self._zmq_ctx = zmq.Context()
-        if current_platform.device_type == "gpu":
+        if current_platform.device_type == "cuda":
             device_uuid = current_platform.get_device_uuid(self.device.index)
         elif current_platform.device_type == "npu":
             device_uuid = f"NPU-{npu_generate_uuid()}"
+        else:
+            raise ValueError(f"Unsupported device type: {current_platform.device_type}")
         update_weights_from_ipc(
             self._zmq_ctx,
             zmq_handles[device_uuid],
