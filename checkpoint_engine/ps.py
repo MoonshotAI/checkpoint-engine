@@ -677,20 +677,6 @@ def _get_master_port(master_port: int | None = None) -> int:
     return master_port
 
 
-def _get_bcast_rank_map(world_size: int, ranks: list[int] | None) -> dict[int, int]:
-    """
-    map the real ranks (receiver_rank) to the bcast ranks (0 ~ len(ranks) - 1),
-    which are generated in self.init_process_group_for_ranks
-    """
-    bcast_rank_map: dict[int, int] = {}
-    if not ranks:
-        bcast_rank_map = {r: r for r in range(world_size)}
-    else:
-        for i, r in enumerate(ranks):
-            bcast_rank_map[r] = i
-    return bcast_rank_map
-
-
 class P2PStore:
     def __init__(self, device_manager: DeviceManager):
         from mooncake.engine import TransferEngine
@@ -1065,21 +1051,41 @@ class ParameterServer:
         """
         assert req_func is not None, "req_func is required"
         try:
+            manager_store = dist.TCPStore(
+                os.getenv("MASTER_ADDR"),
+                _get_master_port() + 1,
+                self._world_size,
+                timeout=timedelta(minutes=10),
+                is_master=self._rank == 0,
+            )
             # if both ranks is None or [], it will use fully broadcast to update to all ranks
             if not ranks:
                 if self._auto_pg and not dist.is_initialized():
                     self.init_process_group()
-                self._update_per_bucket(checkpoint_name, req_func)
+                ranks_group = dist.new_group()
+                self._update_per_bucket(checkpoint_name, req_func, ranks_group, ranks)
             else:
                 if self._auto_pg:
                     if dist.is_initialized():
                         dist.destroy_process_group()
                         # HACK: wait 2s to ensure destroy is finished
                         time.sleep(2)
-                    self.init_process_group_for_ranks(ranks)
-                if self._rank not in ranks:
-                    return
-                self._update_per_bucket(checkpoint_name, req_func, ranks)
+                    self.init_process_group()
+                ranks_group = dist.new_group(ranks)
+                logger.info(
+                    f"[rank{self._rank}] default pg: {dist.group.WORLD}, ranks group: {ranks_group}"
+                )
+                self._update_per_bucket(checkpoint_name, req_func, ranks_group, ranks)
+
+            dist.distributed_c10d._store_based_barrier(
+                rank=self._rank,
+                store=manager_store,
+                group_name="manager_store_barrier",
+                rendezvous_count=self._world_size,
+                timeout=timedelta(minutes=5),
+            )
+            dist.destroy_process_group(ranks_group)
+            del ranks_group
 
         except Exception as e:
             logger.exception(
@@ -1107,7 +1113,9 @@ class ParameterServer:
         self._zmq_addr_counter += 1
         return socket, socket_paths
 
-    def _detect_bucket_size(self, *, disable_h2d_buffer: bool = False) -> tuple[int, bool]:
+    def _detect_bucket_size(
+        self, ranks_group: dist.ProcessGroup, *, disable_h2d_buffer: bool = False
+    ) -> tuple[int, bool]:
         GiB = 1 << 30  # noqa: N806
         # auto detect bucket size
         tensor = torch.tensor(
@@ -1123,7 +1131,7 @@ class ParameterServer:
             dtype=torch.int64,
             device=self.device_manager.device_type,
         )
-        dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
+        dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=ranks_group)
         tensor = tensor.cpu()
         free_bytes, self._zmq_addr_counter = tensor[0].item(), -tensor[1].item()
         max_tensor_bytes = 0
@@ -1186,51 +1194,6 @@ class ParameterServer:
             self._p2p_store.batch_transfer_sync_read(target_addr, buf_ptrs, remote_ptrs, lens)
         self.device_manager.device_module.synchronize()
 
-    def init_process_group_for_ranks(
-        self,
-        ranks: list[int],
-        *,
-        master_port: int | None = None,
-        timeout: timedelta = timedelta(minutes=10),
-    ):
-        """
-        Initialize the process group for the ranks. This global group can be easily destroyed by calling dist.destroy_process_group.
-
-        Args:
-            ranks: The ranks to initialize the process group. ranks should be a subset of all ranks.
-            master_port: The specified port of the master node. If not set, will use _get_master_port to get the port.
-            timeout: The timeout of the process group.
-        """
-        assert not dist.is_initialized()
-        assert ranks, "ranks should be set"
-        if self._rank not in ranks:
-            return
-        assert self._all_hosts, "all_hosts should be set"
-        assert len(self._all_hosts) == self._world_size // self._gpu_count, (
-            f"world_size {self._world_size} should be equal to all_hosts {len(self._all_hosts)}"
-        )
-        rank = ranks.index(self._rank)
-        master_addr = self._all_hosts[ranks[0] // self._gpu_count]
-        master_port = _get_master_port(master_port)
-        logger.info(
-            f"[rank{self._rank}] start to init process group as virtual_rank {rank}, "
-            f"master_addr {master_addr}, master_port {master_port}, world_size {len(ranks)}, "
-        )
-        # only initialize process group and store for ranks, other nodes are not initialized
-        # and will not participate in this update. Since they have registered memory addresses
-        # to p2p_store at the beginning, update ranks can directly get the memory addresses
-        # from other nodes and put the weights into the buffer.
-        store = dist.TCPStore(
-            master_addr, master_port, len(ranks), is_master=rank == 0, timeout=timeout
-        )
-        dist.init_process_group(
-            backend=self.device_manager.backend,
-            world_size=len(ranks),
-            rank=rank,
-            timeout=timeout,
-            store=store,
-        )
-
     def _get_addr_ptrs(self, owner_rank: int) -> tuple[str, list[tuple[int, int]]]:
         addr = self._current_global_parameter_metas[owner_rank].p2p_store_addr
         metas_list = self._current_global_parameter_metas[owner_rank].memory_buffer_metas_list
@@ -1260,10 +1223,13 @@ class ParameterServer:
         self,
         checkpoint_name: str,
         req_func: Callable[[list[tuple[str, str]]], None],
+        ranks_group: dist.ProcessGroup,
         ranks: list[int] | None = None,
     ):
         assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"
         assert dist.is_initialized(), "process group is not initialized"
+        assert ranks_group is not None, "ranks_group should be set"
+
         # if both ranks is None or [], it will use fully broadcast to update to all ranks
         if not ranks:
             logger.info(f"[rank{self._rank}] update checkpoint {checkpoint_name}")
@@ -1281,9 +1247,9 @@ class ParameterServer:
             if not need_update:
                 return
             # first execute a barrier to avoid subsequent device oom
-            dist.barrier()
+            dist.barrier(group=ranks_group)
 
-        bucket_size, disable_h2d_buffer = self._detect_bucket_size()
+        bucket_size, disable_h2d_buffer = self._detect_bucket_size(ranks_group)
         buckets = _gen_h2d_buckets(
             self._current_global_parameter_metas,
             bucket_size,
@@ -1330,7 +1296,6 @@ class ParameterServer:
 
         gidx = 0
         ret_code = torch.zeros((), device=self.device_manager.device_type, dtype=torch.int64)
-        bcast_rank_map = _get_bcast_rank_map(self._world_size, ranks)
         try:
             for i in range(max_len):
                 if i < len(receiver_rank_buckets) and not disable_h2d_buffer:
@@ -1383,7 +1348,7 @@ class ParameterServer:
             socket.recv()
         finally:
             req_thread.join()
-            dist.barrier()
+            dist.barrier(group=ranks_group)
             socket.close()
             if ranks and h2d_buffer is not None:
                 self._p2p_store.unregister_named_tensors([h2d_buffer_name])
