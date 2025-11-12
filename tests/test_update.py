@@ -68,8 +68,8 @@ def run():
     world_size = int(os.getenv("WORLD_SIZE"))
     ctx = get_context("spawn")
     queue = ctx.Queue()
-    _device_uuid = _get_physical_gpu_id(rank)
     ps = ParameterServer(auto_pg=True)
+    _device_uuid = _get_physical_gpu_id(ps.device_manager, rank)
     named_tensors = dict(gen_test_tensors(rank))
     checkpoint_name = "test"
     proc = ctx.Process(target=checker_proc, args=(rank, _device_uuid, named_tensors, queue))
