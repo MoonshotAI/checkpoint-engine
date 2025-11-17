@@ -60,6 +60,7 @@ def update_weights_from_ipc(
         ipc_handle: tuple[Callable, tuple] = socket.recv_pyobj()
         assert isinstance(ipc_handle, tuple)
         buffer = _rebuild_ipc(ipc_handle, device_id)
+        assert buffer.dtype == torch.uint8
         socket.send(b"")
     except Exception as e:
         socket.send_pyobj(e)

@@ -144,9 +144,7 @@ def run(
     _device_uuid = _get_physical_gpu_id(ps.device_manager, rank)
     named_tensors = dict(gen_test_tensors(rank))
     checkpoint_name = "test"
-    proc = ctx.Process(
-        target=checker_func, args=(rank, _device_uuid, named_tensors, queue), daemon=True
-    )
+    proc = ctx.Process(target=checker_func, args=(rank, _device_uuid, named_tensors, queue))
     proc.start()
     with pytest.raises(expected_exception) if need_error else nullcontext() as e:
         ps.register_checkpoint(checkpoint_name, named_tensors=named_tensors)
