@@ -1031,7 +1031,9 @@ class ParameterServer:
         )
         logger.info(f"[rank{self._rank}] init process group successfully.")
 
-    def store_based_barrier(self, store: dist.TCPStore) -> None:
+    def store_based_barrier(
+        self, store: dist.TCPStore, timeout: timedelta = timedelta(minutes=5)
+    ) -> None:
         """
         Perform a store-based barrier synchronization across all ranks.
 
@@ -1047,7 +1049,7 @@ class ParameterServer:
             store=store,
             group_name="parameter_server_barrier",
             rendezvous_count=self._world_size,
-            timeout=timedelta(minutes=5),
+            timeout=timeout,
         )
 
     def update(
@@ -1055,6 +1057,7 @@ class ParameterServer:
         checkpoint_name: str,
         req_func: Callable[[list[tuple[str, str]]], None],
         *,
+        timeout: timedelta = timedelta(minutes=10),
         ranks: list[int] | None = None,
     ) -> None:
         """
@@ -1073,28 +1076,23 @@ class ParameterServer:
         try:
             master_addr = os.getenv("MASTER_ADDR")
             assert master_addr, "master_addr is required"
-
-            # HACK: MASTER_PORT+1 for main process group, MASTER_PORT+2 for barrier store
-            manager_store = dist.TCPStore(
-                master_addr,
-                _get_master_port() + 1,
-                self._world_size,
-                timeout=timedelta(minutes=10),
-                is_master=self._rank == 0,
-            )
-
-            if self._auto_pg and not dist.is_initialized():
-                self.init_process_group()
-
+            if self._auto_pg:
+                if not dist.is_initialized():
+                    self.init_process_group(timeout=timeout)
+                manager_store = dist.distributed_c10d._get_default_store()
+            else:
+                # HACK: MASTER_PORT+2 for barrier store, _get_master_port() returns MASTER_PORT+1
+                manager_store = dist.TCPStore(
+                    master_addr,
+                    _get_master_port() + 1,
+                    self._world_size,
+                    timeout=timeout,
+                    is_master=self._rank == 0,
+                )
             # if both ranks is None or [], it will use fully broadcast to update to all ranks
             ranks_group = dist.new_group(ranks if ranks else None)
-            if not ranks:
-                self._update_per_bucket(checkpoint_name, req_func, ranks_group)
-            else:
-                self._update_per_bucket(checkpoint_name, req_func, ranks_group, ranks)
-
+            self._update_per_bucket(checkpoint_name, req_func, ranks_group, ranks)
             self.store_based_barrier(manager_store)
-
         except Exception as e:
             logger.exception(
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} error {e}"
