@@ -81,6 +81,8 @@ def update_weights_from_ipc(
                     device_manager.device_module.synchronize()
                     socket.send(b"")
                 except Exception as e:  # noqa: BLE001
+                    # Send exception back to Parameter Server.
+                    # Don't raise here. Because all workers should quit in the same way by receiving the exception from PS
                     socket.send_pyobj(e)
             elif isinstance(
                 payload, Exception
