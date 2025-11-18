@@ -671,12 +671,12 @@ class P2PStore:
         self.rank = int(os.getenv("RANK"))
         gpu_count = device_manager.device_module.device_count()
         local_rank = self.rank % gpu_count
-        if device_manager.device_type == "cuda":
-            self.device = _get_my_rdma_device(local_rank, gpu_count, _get_rdma_devices())
-            protocol = "rdma"
-        elif device_manager.device_type == "npu":
+        if device_manager.device_type == "npu":
             self.device = ""
             protocol = "ascend_direct"
+        else:
+            self.device = _get_my_rdma_device(local_rank, gpu_count, _get_rdma_devices())
+            protocol = "rdma"
         self.ip = get_ip()
 
         # we will start at most 8 ps processes, so we use 8 retries to avoid port conflicts in extreme cases
@@ -1267,7 +1267,7 @@ class ParameterServer:
                 dist.broadcast(buffer_b, src=brank)
                 socket.recv()
                 # Issue: Currently in the Ascend, there is a deadlock during transfer engine link establishment and dist barrier.
-                # Temporary workaround: Add sleep to ensure transfer engine link establishment complere before executing dist barrier.
+                # Temporary workaround: Add sleep to ensure transfer engine link establishment complete before executing dist barrier.
                 # In the future, the ascend will solve this bug.
                 if self.device_manager.device_type == "npu" and ranks is not None:
                     time.sleep(1)

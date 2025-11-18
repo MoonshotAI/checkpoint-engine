@@ -20,8 +20,9 @@ To support features like IPC Buffer and Transfer Engine, the following Ascend so
 
 ## Installation
 
-```angular2html
-pip install checkpoint-engine
+Install from src:
+```shell
+pip install -e .
 ```
 Using the flexible P2P implementation requires installation of the Transfer Engine. However, ascend device cannot install transfer engine via pip, requires source compilation.
 
