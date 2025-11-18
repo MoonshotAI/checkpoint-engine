@@ -1277,9 +1277,8 @@ class ParameterServer:
                     self.device_manager.device_module.synchronize()
                     if ret_code.item() != 0:
                         # quit early if any rank failed
-                        exception = RuntimeError("Failed to update weights due to remote errors")
-                        socket.send_pyobj(exception)
-                        raise exception
+                        socket.send_pyobj(RuntimeError("Some workers failed to update weights"))
+                        raise RuntimeError("Failed to update weights due to remote errors")
                     socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
                     gidx += 1
 
