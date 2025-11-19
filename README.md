@@ -145,10 +145,17 @@ A [PR](https://github.com/vllm-project/vllm/pull/24488) is opened to the vLLM pr
 Run a simple correctness test for checkpoint_engine
 
 ```bash
-torchrun --nproc-per-node 8 tests/test_update.py
+pytest tests/test_update.py
 ```
 
-Other unit tests can be done with pytest.
+`test_update.py` are only designed to run with `pytest`. Please don't run it directly with `torchrun`.
+
+Other unit tests can also be done with pytest. Only test_update.py requires GPUs, other tests can be run on CPUs. Only to run CPU tests, use:
+
+```bash
+pytest tests/ -m "not gpu"
+```
+
 ## SGLang Integration
 
 Checkpoint Engine provides efficient distributed checkpoint loading for SGLang inference servers, significantly reducing model loading time for large models and multi-node setups.
