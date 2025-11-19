@@ -1059,6 +1059,8 @@ class ParameterServer:
         *,
         timeout: timedelta = timedelta(minutes=10),
         ranks: list[int] | None = None,
+        master_addr: str | None = None,
+        master_port: int | None = None,
     ) -> None:
         """
         Update the checkpoint to inference engine. This function should be called after gather_metas.
@@ -1070,21 +1072,27 @@ class ParameterServer:
                 which is the fastest way to update weights, especially in colocated architecture.
                 If set, will use p2p to update to the ranks, this is flexible to update to a group of ranks,
                 which is useful in disaggregated architecture.
+            master_addr: The master address for process group initialization. If not set, will use env MASTER_ADDR.
+            master_port: The master port for process group initialization. If not set, will use _get_master_port to get the port, which will use MASTER_PORT+1.
+            timeout: The timeout of the barrier operation.
         """
         assert req_func is not None, "req_func is required"
         ranks_group = None
         try:
-            master_addr = os.getenv("MASTER_ADDR")
+            master_addr = os.getenv("MASTER_ADDR") or master_addr
             assert master_addr, "master_addr is required"
             if self._auto_pg:
                 if not dist.is_initialized():
-                    self.init_process_group(timeout=timeout)
+                    self.init_process_group(
+                        timeout=timeout, master_addr=master_addr, master_port=master_port
+                    )
                 manager_store = dist.distributed_c10d._get_default_store()
             else:
-                # HACK: MASTER_PORT+2 for barrier store, _get_master_port() returns MASTER_PORT+1
+                # HACK: MASTER_PORT+2 for barrier store if master_port is not provided, _get_master_port() returns MASTER_PORT+1
+                # If master_port is provided, use master_port+1 for barrier store
                 manager_store = dist.TCPStore(
                     master_addr,
-                    _get_master_port() + 1,
+                    _get_master_port(master_port) + 1,
                     self._world_size,
                     timeout=timeout,
                     is_master=self._rank == 0,
@@ -1331,8 +1339,7 @@ class ParameterServer:
                             self._copy_to_buffer(checkpoint_name, bucket, buffer_b)
                         else:
                             buffer_b.data.copy_(h2d_buffer[: bucket.size])
-                    brank = bcast_rank_map[receiver_rank]
-                    dist.broadcast(buffer_b, src=brank)
+                    dist.broadcast(buffer_b, src=receiver_rank, group=ranks_group)
                     resp = socket.recv()
                     if resp != b"":
                         msg = resp.decode("utf-8")
@@ -1340,7 +1347,7 @@ class ParameterServer:
                             f"[rank{self._rank}] receive error response from rank {receiver_rank} for bucket {gidx} in checkpoint {checkpoint_name}: {msg}"
                         )
                         ret_code.fill_(1)
-                    dist.all_reduce(ret_code, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(ret_code, op=dist.ReduceOp.SUM, group=ranks_group)
                     self.device_manager.device_module.synchronize()
                     if ret_code.item() != 0:
                         # quit early if any rank failed
