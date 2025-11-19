@@ -305,13 +305,21 @@ def _get_my_rdma_device(local_rank: int, gpu_count: int, devices: list[str]) -> 
     """
     if not devices:
         raise RuntimeError("no rdma devices found")
-    assert len(devices) <= gpu_count, (
-        f"rdma devices count {len(devices)} should be less than or equal to gpu count {gpu_count}"
-    )
-    assert gpu_count % len(devices) == 0, (
-        f"gpu count {gpu_count} should be divisible by rdma devices count {len(devices)}"
-    )
-    return devices[local_rank // (gpu_count // len(devices))]
+    try:
+        assert len(devices) <= gpu_count, (
+            f"rdma devices count {len(devices)} should be less than or equal to gpu count {gpu_count}"
+        )
+        assert gpu_count % len(devices) == 0, (
+            f"gpu count {gpu_count} should be divisible by rdma devices count {len(devices)}"
+        )
+        return devices[local_rank // (gpu_count // len(devices))]
+    except AssertionError:
+        logger.error(
+            "Please set 'NCCL_IB_HCA' or 'PS_P2P_STORE_RDMA_DEVICES' environment variable to choose proper number of RDMA devices."
+            "The number of RDMA devices should be less than or equal to GPU count, and GPU count should be divisible by the number of RDMA devices."
+            "The acceptable value by NCCL_IB_HCA is documented in 'https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html#id8'."
+        )
+        raise
 
 
 def _parse_NCCL_IB_HCA(value: str, available_devices: list[str]) -> list[str]:
@@ -750,7 +758,7 @@ class ParameterServer:
         Args:
             auto_pg: Whether to automatically initialize the process group.
                 Notice that if auto_pg is True, will destroy the process group after update.
-            mem_fraction: The proportion (as a fraction) of the current free CUDA memory for allocation.
+            mem_fraction: The proportion (as a fraction) of the current free device memory for allocation.
         """
         self._rank = rank or int(os.environ.get("RANK", None))
         self._world_size = world_size or int(os.environ.get("WORLD_SIZE", None))
@@ -986,21 +994,22 @@ class ParameterServer:
                 if self._rank not in ranks:
                     return
                 self._update_per_bucket(checkpoint_name, req_func, ranks)
-            if self._auto_pg:
-                dist.destroy_process_group()
 
-            self.device_manager.device_module.empty_cache()
-
-            logger.info(
-                f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} done. "
-                f"Current CUDA allocated {self.device_manager.device_module.memory_allocated() / 1024 / 1024} MB, "
-                f"reserved {self.device_manager.device_module.memory_reserved() / 1024 / 1024} MB."
-            )
         except Exception as e:
             logger.exception(
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} error {e}"
             )
             raise
+        finally:
+            if self._auto_pg and (not ranks or self._rank in ranks):
+                dist.destroy_process_group()
+
+            self.device_manager.device_module.empty_cache()
+            logger.info(
+                f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} done. "
+                f"Current device allocated {self.device_manager.device_module.memory_allocated() / 1024 / 1024} MB, "
+                f"reserved {self.device_manager.device_module.memory_reserved() / 1024 / 1024} MB."
+            )
 
     def _bind_zmq_socket(self) -> tuple[zmq.Socket, list[tuple[str, str]]]:
         def zmq_handle(device_uuid: str) -> str:
@@ -1017,7 +1026,7 @@ class ParameterServer:
         # auto detect bucket size
         tensor = torch.tensor(
             [
-                # proportion of current cuda free memory bytes
+                # proportion of current device free memory bytes
                 int(
                     float(self.device_manager.device_module.mem_get_info()[0]) * self._mem_fraction
                 ),
@@ -1185,7 +1194,7 @@ class ParameterServer:
 
             if not need_update:
                 return
-            # first execute a barrier to avoid subsequent cuda oom
+            # first execute a barrier to avoid subsequent device oom
             dist.barrier()
 
         bucket_size, disable_h2d_buffer = self._detect_bucket_size()
@@ -1234,57 +1243,66 @@ class ParameterServer:
         socket.send_pyobj(handle)
 
         gidx = 0
+        ret_code = torch.zeros((), device=self.device_manager.device_type, dtype=torch.int64)
         bcast_rank_map = _get_bcast_rank_map(self._world_size, ranks)
-        for i in range(max_len):
-            if i < len(receiver_rank_buckets) and not disable_h2d_buffer:
-                self._copy_to_buffer(
-                    checkpoint_name,
-                    receiver_rank_buckets[i][1],
-                    h2d_buffer,
-                    receiver_rank_buckets[i][0] if ranks else None,
-                )
-            for receiver_rank, _buckets in buckets_by_receiver_rank.items():
-                if i >= len(_buckets):
-                    continue
-                bucket = _buckets[i]
-                alloc, reserved = (
-                    self.device_manager.device_module.memory_allocated() / 1024 / 1024,
-                    self.device_manager.device_module.memory_reserved() / 1024 / 1024,
-                )
-                self._logger_rank0(
-                    f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} receiver_rank {receiver_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
-                    f"Current CUDA allocated {alloc:.2f} MB, "
-                    f"reserved {reserved:.2f} MB."
-                )
-                start = gidx % 2 * bucket_size
-                buffer_b: torch.Tensor = buffer[start : start + bucket.size]
-                if receiver_rank == self._rank:
-                    if disable_h2d_buffer:
-                        self._copy_to_buffer(checkpoint_name, bucket, buffer_b)
-                    else:
-                        buffer_b.data.copy_(h2d_buffer[: bucket.size])
-                brank = bcast_rank_map[receiver_rank]
-                dist.broadcast(buffer_b, src=brank)
-                socket.recv()
-                # Issue: Currently in the Ascend, there is a deadlock during transfer engine link establishment and dist barrier.
-                # Temporary workaround: Add sleep to ensure transfer engine link establishment complete before executing dist barrier.
-                # In the future, the ascend will solve this bug.
-                if self.device_manager.device_type == "npu" and ranks is not None:
-                    time.sleep(1)
-                dist.barrier()
-                socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
-                gidx += 1
+        try:
+            for i in range(max_len):
+                if i < len(receiver_rank_buckets) and not disable_h2d_buffer:
+                    self._copy_to_buffer(
+                        checkpoint_name,
+                        receiver_rank_buckets[i][1],
+                        h2d_buffer,
+                        receiver_rank_buckets[i][0] if ranks else None,
+                    )
+                for receiver_rank, _buckets in buckets_by_receiver_rank.items():
+                    if i >= len(_buckets):
+                        continue
+                    bucket = _buckets[i]
+                    alloc, reserved = (
+                        self.device_manager.device_module.memory_allocated() / 1024 / 1024,
+                        self.device_manager.device_module.memory_reserved() / 1024 / 1024,
+                    )
+                    self._logger_rank0(
+                        f"[rank{self._rank}] begin to update bucket {gidx + 1}/{len(buckets)} receiver_rank {receiver_rank} in checkpoint {checkpoint_name}, bucket_size: {bucket.size / 1024 / 1024:.2f}MiB, length: {len(bucket.items)}. "
+                        f"Current device allocated {alloc:.2f} MB, "
+                        f"reserved {reserved:.2f} MB."
+                    )
+                    start = gidx % 2 * bucket_size
+                    buffer_b: torch.Tensor = buffer[start : start + bucket.size]
+                    if receiver_rank == self._rank:
+                        if disable_h2d_buffer:
+                            self._copy_to_buffer(checkpoint_name, bucket, buffer_b)
+                        else:
+                            buffer_b.data.copy_(h2d_buffer[: bucket.size])
+                    brank = bcast_rank_map[receiver_rank]
+                    dist.broadcast(buffer_b, src=brank)
+                    resp = socket.recv()
+                    if resp != b"":
+                        exception_obj = pickle.loads(resp)
+                        logger.error(
+                            f"[rank{self._rank}] receive error response '{type(exception_obj).__name__}: {exception_obj}' from rank {receiver_rank} for bucket {gidx} in checkpoint {checkpoint_name}"
+                        )
+                        ret_code.fill_(1)
+                    dist.all_reduce(ret_code, op=dist.ReduceOp.SUM)
+                    self.device_manager.device_module.synchronize()
+                    if ret_code.item() != 0:
+                        # quit early if any rank failed
+                        socket.send_pyobj(RuntimeError("Some workers failed to update weights"))
+                        raise RuntimeError("Failed to update weights due to remote errors")
+                    socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
+                    gidx += 1
 
-        socket.recv()
-        socket.send_pyobj(None)
-        socket.recv()
-        req_thread.join()
-        dist.barrier()
-        socket.close()
-        if ranks and h2d_buffer is not None:
-            self._p2p_store.unregister_named_tensors([h2d_buffer_name])
+            socket.recv()
+            socket.send_pyobj(None)
+            socket.recv()
+        finally:
+            req_thread.join()
+            dist.barrier()
+            socket.close()
+            if ranks and h2d_buffer is not None:
+                self._p2p_store.unregister_named_tensors([h2d_buffer_name])
 
-        self.device_manager.device_module.empty_cache()
+            self.device_manager.device_module.empty_cache()
 
 
 def _init_api(ps: ParameterServer) -> Any:
@@ -1302,6 +1320,7 @@ def _init_api(ps: ParameterServer) -> Any:
         update_url: str | None = None
         inference_group_ranks: list[int] = []
         timeout: float = 300.0
+        uds: str | None = None
 
     def wrap_exception(func: Callable[[], None]) -> Response:
         try:
@@ -1334,7 +1353,9 @@ def _init_api(ps: ParameterServer) -> Any:
                 return
             if req.inference_group_ranks:
                 socket_paths = [socket_paths[i] for i in req.inference_group_ranks]
-            request_inference_to_update(req.update_url, dict(socket_paths), timeout=req.timeout)
+            request_inference_to_update(
+                req.update_url, dict(socket_paths), timeout=req.timeout, uds=req.uds
+            )
 
         return wrap_exception(lambda: ps.update(checkpoint_name, update_func, ranks=req.ranks))
 
