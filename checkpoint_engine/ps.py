@@ -679,19 +679,23 @@ class P2PStore:
         self.rank = int(os.getenv("RANK"))
         gpu_count = device_manager.device_module.device_count()
         local_rank = self.rank % gpu_count
-        if device_manager.device_type == "npu":
+        device_type = device_manager.device_type
+        if device_type == "npu" and os.getenv("PS_P2P_STORE_RDMA_DEVICES") is None:
             self.device = ""
-            protocol = "ascend_direct"
         else:
             self.device = _get_my_rdma_device(local_rank, gpu_count, _get_rdma_devices())
-            protocol = "rdma"
         self.ip = get_ip()
 
         # we will start at most 8 ps processes, so we use 8 retries to avoid port conflicts in extreme cases
         retry_count = 8
         for i in range(retry_count):
             self.engine = TransferEngine()
-            ret = self.engine.initialize(self.ip, "P2PHANDSHAKE", protocol, self.device)
+            ret = self.engine.initialize(
+                self.ip,
+                "P2PHANDSHAKE",
+                "ascend_direct" if device_type == "npu" else "rdma",
+                self.device,
+            )
             if ret == 0:
                 break
             # sleep 0.5 ~ 2.0s, to avoid port conflicts when two processes retry at the same time
