@@ -487,12 +487,18 @@ def _register_checkpoint(
     def register_pin_memory(
         idx: int, size: int, shared_pin_memory: list[MemoryBuffer] | None = None
     ) -> tuple[int, torch.Tensor]:
-        buffer = (
-            torch.empty(size, dtype=torch.uint8, pin_memory=True)
-            if not shared_pin_memory
-            else shared_pin_memory[idx].buffer
-        )
-        return idx, buffer
+        if shared_pin_memory:
+            # Reusing pin memory only support fixed shape of checkpoints, which is registered the first time
+            assert idx < len(shared_pin_memory), (
+                f"idx {idx} should be less than shared_pin_memory length {len(shared_pin_memory)}"
+            )
+            assert shared_pin_memory[idx].size == size, (
+                f"shared_pin_memory[{idx}].size {shared_pin_memory[idx].size} should be equal to {size}"
+            )
+            return idx, shared_pin_memory[idx].buffer
+        else:
+            buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+            return idx, buffer
 
     def register_tensor(buffer: torch.Tensor, offset: int, tensor: torch.Tensor):
         buffer[offset : offset + tensor.nbytes] = tensor.view(-1).view(dtype=torch.uint8)
@@ -803,8 +809,7 @@ class ParameterServer:
         self._zmq_addr_counter = 0
 
         self.shared_memory_pool_name = "__shared_memory_pool__"
-        # this dict stores all currently registered checkpoints
-        # dict key is checkpoint_name, value is whether use shared memory pool
+        # stores the name of the checkpoint currently using the shared memory pool, or empty string if none
         self._current_shared_memory_pool_user: str = ""
         self._memory_pool: dict[str, list[MemoryBuffer]] = {}
         self._memory_pool[self.shared_memory_pool_name] = []
@@ -823,16 +828,16 @@ class ParameterServer:
         self._rdma_device = None if self._p2p_store is None else self._p2p_store.device
 
     def _get_memory_pool(self, checkpoint_name: str) -> list[MemoryBuffer]:
-        if (
-            checkpoint_name not in self._memory_pool
-            and checkpoint_name != self._current_shared_memory_pool_user
-        ):
-            raise RuntimeError(f"checkpoint {checkpoint_name} not registered in memory pool")
-        return (
-            self._memory_pool[checkpoint_name]
-            if checkpoint_name != self._current_shared_memory_pool_user
-            else self._memory_pool[self.shared_memory_pool_name]
-        )
+        if checkpoint_name == self._current_shared_memory_pool_user:
+            if not self._memory_pool[self.shared_memory_pool_name]:
+                raise RuntimeError(
+                    f"shared memory pool is not initialized, but checkpoint {checkpoint_name} is using it"
+                )
+            return self._memory_pool[self.shared_memory_pool_name]
+        elif checkpoint_name in self._memory_pool:
+            return self._memory_pool[checkpoint_name]
+        else:
+            raise RuntimeError(f"checkpoint {checkpoint_name} is not registered")
 
     def _logger_rank0(self, msg: str):
         if self._local_rank == 0:
@@ -866,20 +871,20 @@ class ParameterServer:
             checkpoint_name: The name of the checkpoint.
             files: The safetensors files to register.
             named_tensors: The named tensors to register.
+            use_shared_memory_pool: If True, uses a reusable shared pin memory pool instead of allocating new memory.
+                Only one checkpoint can use the shared pool at a time. The pool's shape is fixed on first use and
+                cannot accommodate checkpoints with different memory requirements.
         """
         try:
             if use_shared_memory_pool:
                 logger.info(
                     f"[rank{self._rank}] checkpoint {checkpoint_name} use shared memory pool"
                 )
-                if self._current_shared_memory_pool_user:
-                    logger.error(
-                        f"cannot register checkpoint {checkpoint_name} to shared memory pool, "
-                        f"since checkpoint {self._current_shared_memory_pool_user} is already using shared memory pool. "
-                        f"This registration may cause unexpected conflicts."
-                    )
-                    return
-
+                assert self._current_shared_memory_pool_user == "", (
+                    f"cannot register checkpoint {checkpoint_name} to shared memory pool, "
+                    f"since checkpoint {self._current_shared_memory_pool_user} is already using shared memory pool. "
+                    f"This registration may cause unexpected conflicts."
+                )
                 self._memory_pool[self.shared_memory_pool_name] = _register_checkpoint(
                     files=files or [],
                     named_tensors=named_tensors or {},
