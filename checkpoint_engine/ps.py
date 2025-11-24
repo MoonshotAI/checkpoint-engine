@@ -899,6 +899,8 @@ class ParameterServer:
 
         dist.all_gather_object(metas_lst, metas)
 
+        self._current_global_parameter_metas = {}
+
         num_parameters = 0
         all_hosts: list[str] = []
         global_device_uuids: list[str] = []
