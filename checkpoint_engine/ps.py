@@ -930,6 +930,9 @@ class ParameterServer:
             )
             return
 
+        # TODO: currently, we just mark the shared memory pool as unused when unregistering.
+        # Physically releasing the shared memory pool is not supported yet.
+        # We may add unregister shared memory pool logic in the future if necessary.
         if checkpoint_name == self._current_shared_memory_pool_user:
             self._current_shared_memory_pool_user = ""
             return
@@ -955,6 +958,10 @@ class ParameterServer:
             self.init_process_group()
         assert dist.is_initialized(), "process group is not initialized"
         metas_lst: list[DataToGather | None] = [None for _ in range(self._world_size)]  # type: ignore
+        try:
+            memory_pool = self._get_memory_pool(checkpoint_name)
+        except RuntimeError:
+            memory_pool = []
         metas = DataToGather(
             memory_buffer_metas_list=[
                 MemoryBufferMetas(
@@ -962,7 +969,7 @@ class ParameterServer:
                     ptr=x.buffer.data_ptr(),
                     size=x.size,
                 )
-                for x in (self._get_memory_pool(checkpoint_name) or [])
+                for x in memory_pool
             ],
             p2p_store_addr=None if self._p2p_store is None else self._p2p_store.addr,
             host_ip=get_ip(),
