@@ -93,6 +93,7 @@ class ParameterMeta(BaseModel):
     name: str
     dtype: _TorchDtype
     shape: _TorchSize
+    manually_aligned: bool = True
 
 
 class BucketRange(NamedTuple):
@@ -141,7 +142,11 @@ def _align_size(dtype: torch.dtype, shape: torch.Size) -> int:
 def _to_named_tensor(metas: list[ParameterMeta], offset: int = 0) -> list[dict]:
     ret = []
     for meta in metas:
-        size = _align_size(meta.dtype, meta.shape)
+        size = (
+            _align_size(meta.dtype, meta.shape)
+            if meta.manually_aligned
+            else meta.dtype.itemsize * meta.shape.numel()
+        )
         ret.append(
             {
                 "name": meta.name,
@@ -463,12 +468,8 @@ def _register_checkpoint(
     if not files and not named_tensors:
         return []
     memory_buffers: list[MemoryBuffer] = []
-    inplace_pin = all(
-        file.startswith("/dev/shm/") and file.endswith(".safetensors")  # noqa: S108
-        for file in files or []
-    )
-    if inplace_pin:
 
+    def inplace_pin_memory(files: list[str]) -> list[MemoryBuffer]:
         def _pin(t: torch.Tensor):
             """
             Pin the memory of tensor in-place.
@@ -495,6 +496,7 @@ def _register_checkpoint(
                 n = int.from_bytes(n, byteorder="little", signed=False)
                 start_pos = n + flag_size
 
+            os.remove(file_path)
             time.sleep(3)
             header_tensor = t[flag_size:start_pos]
             header = json.loads(header_tensor.numpy().tobytes())
@@ -507,7 +509,10 @@ def _register_checkpoint(
                 assert offset == start, f"offset {offset} should be equal to start {start}"
                 metas.append(
                     ParameterMeta(
-                        name=name, dtype=_getdtype(meta["dtype"]), shape=torch.Size(meta["shape"])
+                        name=name,
+                        dtype=_getdtype(meta["dtype"]),
+                        shape=torch.Size(meta["shape"]),
+                        manually_aligned=False,
                     )
                 )
                 offset = end
@@ -519,13 +524,24 @@ def _register_checkpoint(
             _pin(buffer)
             return MemoryBuffer(buffer=buffer, size=buffer.nbytes, metas=metas)
 
+        local_memory_buffers: list[MemoryBuffer] = []
+        lock = threading.Lock()
+        idx = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
             futures = [executor.submit(_inplace_pin_memory, file) for file in files]
             for future in concurrent.futures.as_completed(futures):
                 memory_buffer = future.result()
-                memory_buffers.append(memory_buffer)
+                with lock:
+                    local_memory_buffers.append(memory_buffer)
+                    logger.info(
+                        f"[rank{rank}] register pin_memory for file in /dev/shm {idx + 1}/{len(files)} finished"
+                    )
+                    idx += 1
+        return local_memory_buffers
 
-    else:
+    def normal_pin_memory(
+        files: list[str], named_tensors: dict[str, torch.Tensor]
+    ) -> list[MemoryBuffer]:
         parameters = _load_checkpoint(files)
         if named_tensors:
             parameters.update(named_tensors)
@@ -535,7 +551,8 @@ def _register_checkpoint(
             size: int
             metas: list[ParameterMeta]
 
-        buckets: list[MemoryBucket] = [MemoryBucket(size=0, metas=[])]
+        buckets: list[MemoryBucket] = []
+        buckets.append(MemoryBucket(size=0, metas=[]))
         for name, tensor in sorted(parameters.items()):
             size = _align_size(tensor.dtype, tensor.shape)
             if buckets[-1].size + size > bucket_size:
@@ -546,27 +563,27 @@ def _register_checkpoint(
             )
             buckets[-1].size += size
 
-        memory_buffers = [
+        local_memory_buffers = [
             MemoryBuffer(buffer=torch.empty(0), size=bucket.size, metas=bucket.metas)
             for bucket in buckets
         ]
 
-    def register_pin_memory(
-        idx: int, size: int, shared_pin_memory: list[MemoryBuffer] | None = None
-    ) -> tuple[int, torch.Tensor]:
-        if shared_pin_memory:
-            # If shared_pin_memory is provided, reuse the pin memory buffer, do not allocate new one
-            # Reusing pin memory only support fixed shape of checkpoints, which is registered the first time
-            assert idx < len(shared_pin_memory), (
-                f"idx {idx} should be less than shared_pin_memory length {len(shared_pin_memory)}"
-            )
-            assert shared_pin_memory[idx].size == size, (
-                f"shared_pin_memory[{idx}].size {shared_pin_memory[idx].size} should be equal to {size}"
-            )
-            return idx, shared_pin_memory[idx].buffer
-        else:
-            buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-            return idx, buffer
+        def register_pin_memory(
+            idx: int, size: int, shared_pin_memory: list[MemoryBuffer] | None = None
+        ) -> tuple[int, torch.Tensor]:
+            if shared_pin_memory:
+                # If shared_pin_memory is provided, reuse the pin memory buffer, do not allocate new one
+                # Reusing pin memory only support fixed shape of checkpoints, which is registered the first time
+                assert idx < len(shared_pin_memory), (
+                    f"idx {idx} should be less than shared_pin_memory length {len(shared_pin_memory)}"
+                )
+                assert shared_pin_memory[idx].size == size, (
+                    f"shared_pin_memory[{idx}].size {shared_pin_memory[idx].size} should be equal to {size}"
+                )
+                return idx, shared_pin_memory[idx].buffer
+            else:
+                buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+                return idx, buffer
 
         def register_tensor(buffer: torch.Tensor, offset: int, tensor: torch.Tensor):
             buffer[offset : offset + tensor.nbytes] = tensor.view(-1).view(dtype=torch.uint8)
@@ -587,7 +604,7 @@ def _register_checkpoint(
             assert buffer.numel() == buckets[idx].size, (
                 f"buffer numel {buffer.numel()} should be equal to bucket size {buckets[idx].size}"
             )
-            memory_buffers[idx].buffer = buffer
+            local_memory_buffers[idx].buffer = buffer
             logger.info(
                 f"[rank{rank}] register pin_memory for bucket {idx + 1}/{len(buckets)} finished, "
                 f"size {buffer.numel() / 1024 / 1024:.2f}MiB, start to copy tensors to buffer"
@@ -604,6 +621,20 @@ def _register_checkpoint(
                 offset += size
         for future in concurrent.futures.as_completed(new_futures):
             future.result()
+        return local_memory_buffers
+
+    files_to_inplace_pin = [
+        file
+        for file in files
+        if file.startswith("/dev/shm/") and file.endswith(".safetensors")  # noqa: S108
+    ]
+    files_to_normal_pin = [file for file in files if file not in files_to_inplace_pin]
+    if files_to_normal_pin or named_tensors:
+        memory_buffers.extend(
+            normal_pin_memory(files=files_to_normal_pin, named_tensors=named_tensors)
+        )
+    if files_to_inplace_pin:
+        memory_buffers.extend(inplace_pin_memory(files_to_inplace_pin))
     return memory_buffers
 
 
@@ -652,7 +683,11 @@ def _gen_h2d_buckets(
         for idx, metas in enumerate(items.memory_buffer_metas_list):
             start_offset, offset = 0, 0
             for meta in metas.metas:
-                s = _align_size(meta.dtype, meta.shape)
+                s = (
+                    _align_size(meta.dtype, meta.shape)
+                    if meta.manually_aligned
+                    else meta.dtype.itemsize * meta.shape.numel()
+                )
                 if buckets[-1][1].size + s > bucket_size:
                     if offset - start_offset > 0:
                         buckets[-1][1].ranges.append(
@@ -1197,7 +1232,12 @@ class ParameterServer:
         for items in self._current_global_parameter_metas.values():
             for metas_list in items.memory_buffer_metas_list:
                 for meta in metas_list.metas:
-                    max_tensor_bytes = max(max_tensor_bytes, _align_size(meta.dtype, meta.shape))
+                    max_tensor_bytes = max(
+                        max_tensor_bytes,
+                        _align_size(meta.dtype, meta.shape)
+                        if meta.manually_aligned
+                        else meta.dtype.itemsize * meta.shape.numel(),
+                    )
         free_bytes_divided_3 = free_bytes // (3 * _ALIGN_SIZE) * _ALIGN_SIZE
         if max_tensor_bytes <= free_bytes_divided_3 and not disable_h2d_buffer:
             self._logger_rank0(f"[rank{self._rank}] use h2d buffer")
