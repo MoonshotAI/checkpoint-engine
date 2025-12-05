@@ -1,4 +1,5 @@
 import gc
+import traceback
 from collections.abc import Callable
 from typing import TypedDict
 
@@ -63,7 +64,8 @@ def update_weights_from_ipc(
         assert buffer.dtype == torch.uint8
         socket.send(b"")
     except Exception as e:
-        socket.send_pyobj(e)
+        msg = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        socket.send_string(msg)
         socket.recv()  # wait for ack
         raise
     try:
@@ -83,7 +85,8 @@ def update_weights_from_ipc(
                 except Exception as e:  # noqa: BLE001
                     # Send exception back to Parameter Server.
                     # Don't raise here. Because all workers should quit in the same way by receiving the exception from PS
-                    socket.send_pyobj(e)
+                    msg = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                    socket.send_string(msg)
             elif isinstance(
                 payload, Exception
             ):  # error occurred, got force quit signal from Parameter Server

@@ -1284,9 +1284,9 @@ class ParameterServer:
                     dist.broadcast(buffer_b, src=brank)
                     resp = socket.recv()
                     if resp != b"":
-                        exception_obj = pickle.loads(resp)
+                        msg = resp.decode("utf-8")
                         logger.error(
-                            f"[rank{self._rank}] receive error response '{type(exception_obj).__name__}: {exception_obj}' from rank {receiver_rank} for bucket {gidx} in checkpoint {checkpoint_name}"
+                            f"[rank{self._rank}] receive error response from rank {receiver_rank} for bucket {gidx} in checkpoint {checkpoint_name}: {msg}"
                         )
                         ret_code.fill_(1)
                     dist.all_reduce(ret_code, op=dist.ReduceOp.SUM)
