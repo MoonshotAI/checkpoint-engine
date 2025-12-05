@@ -19,7 +19,7 @@ import torch.distributed as dist
 import zmq
 from loguru import logger
 from pydantic import BaseModel, PlainSerializer, PlainValidator, WithJsonSchema
-from safetensors.torch import _getdtype, safe_open
+from safetensors.torch import _TYPES, _getdtype, safe_open
 from torch.multiprocessing.reductions import reduce_tensor
 
 from checkpoint_engine.device_utils import DeviceManager, get_ip, npu_generate_uuid
@@ -500,22 +500,28 @@ def _register_checkpoint(
             time.sleep(3)
             header_tensor = t[flag_size:start_pos]
             header = json.loads(header_tensor.numpy().tobytes())
+            if "__metadata__" in header:
+                header.pop("__metadata__")
 
             metas: list[ParameterMeta] = []
             offset = 0
-            for name, meta in sorted(header.items(), key=lambda x: x[1]["data_offsets"]):
-                start, end = meta["data_offsets"]
-                # safetensors format ensures offsets are aligned
-                assert offset == start, f"offset {offset} should be equal to start {start}"
-                metas.append(
-                    ParameterMeta(
-                        name=name,
-                        dtype=_getdtype(meta["dtype"]),
-                        shape=torch.Size(meta["shape"]),
-                        manually_aligned=False,
+            try:
+                for name, meta in sorted(header.items(), key=lambda x: x[1]["data_offsets"]):
+                    start, end = meta["data_offsets"]
+                    # safetensors format ensures offsets are aligned
+                    assert offset == start, f"offset {offset} should be equal to start {start}"
+                    metas.append(
+                        ParameterMeta(
+                            name=name,
+                            dtype=_getdtype(meta["dtype"]),
+                            shape=torch.Size(meta["shape"]),
+                            manually_aligned=False,
+                        )
                     )
-                )
-                offset = end
+                    offset = end
+            except Exception as e:
+                logger.error(f"fail to parse safetensors header from {file_path}: {e}")
+                raise
 
             buffer = t[start_pos:]
             assert offset == buffer.nbytes, (
