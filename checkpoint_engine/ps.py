@@ -19,7 +19,7 @@ import torch.distributed as dist
 import zmq
 from loguru import logger
 from pydantic import BaseModel, PlainSerializer, PlainValidator, WithJsonSchema
-from safetensors.torch import _TYPES, _getdtype, safe_open
+from safetensors.torch import _getdtype, safe_open
 from torch.multiprocessing.reductions import reduce_tensor
 
 from checkpoint_engine.device_utils import DeviceManager, get_ip, npu_generate_uuid
@@ -477,27 +477,27 @@ def _register_checkpoint(
             """
             cudart = torch.cuda.cudart()
             r = cudart.cudaHostRegister(t.data_ptr(), t.numel() * t.element_size(), 0)
-            assert r == 0, f"pin memory error, error code: {r.value}"
+            assert r == 0, f"pin memory error, error code: {r}"
 
         def _inplace_pin_memory(file_path: str) -> MemoryBuffer:
+            """
+            safetensors format see https://huggingface.co/docs/safetensors/en/index#format.
+            We load the safetensors file as bytes, then parse the header manually to get parameter metas.
+            The actual tensor data is in the remaining bytes and is naturally aligned.
+            We pin the remaining bytes as the buffer, making pinning faster.
+            """
             # TODO: should only support /dev/shm? but we found files in disk also work?
             size = os.stat(file_path).st_size
-            t = torch.from_file(file_path, True, size, dtype=torch.uint8)
-
-            # safetensors format see https://huggingface.co/docs/safetensors/en/index#format.
-            # We load the safetensors file as bytes, then parse the header manually to get parameter metas.
-            # and the actual tensor data is in the remaining bytes.
-            # We pin the remaining bytes as the buffer, making pinning faster.
             flag_size = 8
-            with open(file_path, "rb") as f:
-                n = bytearray(flag_size)
-                data = f.readinto(n)
-                assert data == flag_size, f"data {data} should be equal to flag_size {flag_size}"
-                n = int.from_bytes(n, byteorder="little", signed=False)
-                start_pos = n + flag_size
-
+            t = torch.from_file(file_path, True, size, dtype=torch.uint8)
+            assert t.nbytes > flag_size, (
+                f"tensor nbytes {t.nbytes} should be greater than flag_size {flag_size}"
+            )
             os.remove(file_path)
-            time.sleep(3)
+            start_pos = (
+                int.from_bytes(t[0:flag_size].numpy().tobytes(), byteorder="little", signed=False)
+                + flag_size
+            )
             header_tensor = t[flag_size:start_pos]
             header = json.loads(header_tensor.numpy().tobytes())
             if "__metadata__" in header:
