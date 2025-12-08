@@ -215,6 +215,11 @@ def run_with_files(
     ps.unregister_checkpoint(checkpoint_name)
     queue.put(None)
     proc.join()
+    if rank == 0:
+        import shutil
+
+        os.removedirs(dev_shm_dir)
+        shutil.rmtree(disk_dir)
     assert proc.exitcode == 0
 
 
