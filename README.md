@@ -75,17 +75,15 @@ Use the flexible P2P implementation, notice this will install `mooncake-transfer
 pip install 'checkpoint-engine[p2p]'
 ```
 
-If set `NCCL_IB_HCA` env, checkpoint-engine will use it to auto select net devices for different ranks. Available patterns can be found from [NCCL documentation](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html#id8). If not set, it will read all RDMA devices and try to divide them into each rank.
-
 ## Getting Started
 
-Prepare an H800 or H20 machine with 8 GPUs with latest vLLM. Be sure to include [/collective_rpc API endpoint](https://github.com/vllm-project/vllm/commit/f7cf5b512ee41f36613deb2471a44de5f304f70d) commit (available in main branch) since checkpoint-engine will use this endpoint to update weights.
+Prepare an H800 or H20 machine with 8 GPUs with vLLM. Be sure to include [/collective_rpc API endpoint](https://github.com/vllm-project/vllm/commit/f7cf5b512ee41f36613deb2471a44de5f304f70d) commit (available in main branch) since checkpoint-engine will use this endpoint to update weights. vLLM version `v0.10.2` is fully tested and recommended.
 
 ```Bash
-cd /opt && git clone https://github.com/vllm-project/vllm && cd vllm
+mkdir -p /opt/vLLM && cd /opt/vLLM
 uv venv --python 3.12 --seed
 source .venv/bin/activate
-VLLM_USE_PRECOMPILED=1 uv pip install --editable .
+uv pip install vllm==0.10.2
 ```
 
 Install checkpoint-engine
@@ -155,6 +153,11 @@ Other unit tests can also be done with pytest. Only test_update.py requires GPUs
 ```bash
 pytest tests/ -m "not gpu"
 ```
+
+### Environment Variables
+- `PS_MAX_BUCKET_SIZE_GB`: An integer is used to set the maximum bucket size for checkpoint-engine. If not set, 8GB is used as default.
+- `PS_P2P_STORE_RDMA_DEVICES`: Comma-separated RDMA devices' names for P2P transfer. If not set, checkpoint-engine will fall back to use `NCCL_IB_HCA` to detect RDMA devices.
+- `NCCL_IB_HCA`: Available patterns can be found from [NCCL documentation](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html#id8). If also not set, all RDMA devices will be used and divided evenly among the ranks.
 
 ## SGLang Integration
 
