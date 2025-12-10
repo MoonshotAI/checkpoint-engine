@@ -80,6 +80,9 @@ pip install 'checkpoint-engine[p2p]'
 Prepare an H800 or H20 machine with 8 GPUs with vLLM. Be sure to include [/collective_rpc API endpoint](https://github.com/vllm-project/vllm/commit/f7cf5b512ee41f36613deb2471a44de5f304f70d) commit (available in main branch) since checkpoint-engine will use this endpoint to update weights. vLLM version `v0.10.2` is fully tested and recommended.
 
 ```Bash
+mkdir -p /opt/vLLM && cd /opt/vLLM
+uv venv --python 3.12 --seed
+source .venv/bin/activate
 uv pip install vllm==0.10.2
 ```
 
