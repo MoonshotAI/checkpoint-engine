@@ -969,6 +969,8 @@ class ParameterServer:
     ) -> None:
         """
         Register a checkpoint to the parameter server. Both files and named_tensors will be registered together.
+        Warning: .safetensors files in /dev/shm/ will be pinned in-place, and the files will be REMOVED after pinning.
+        Please make sure to copy the files to disks if you need to keep them.
 
         Args:
             checkpoint_name: The name of the checkpoint.
