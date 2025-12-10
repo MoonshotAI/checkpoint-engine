@@ -454,6 +454,7 @@ def _register_checkpoint(
     files: list[str],
     named_tensors: dict[str, torch.Tensor],
     rank: int | None = None,
+    shared_pin_memory: list[MemoryBuffer] | None = None,
 ) -> list[MemoryBuffer]:
     logger.info(
         f"[rank{rank}] start to register checkpoint with {len(files)} files and {len(named_tensors)} named_tensors"
@@ -483,16 +484,34 @@ def _register_checkpoint(
         for bucket in buckets
     ]
 
-    def register_pin_memory(idx: int, size: int) -> tuple[int, torch.Tensor]:
-        buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-        return idx, buffer
+    def register_pin_memory(
+        idx: int, size: int, shared_pin_memory: list[MemoryBuffer] | None = None
+    ) -> tuple[int, torch.Tensor]:
+        if shared_pin_memory:
+            # If shared_pin_memory is provided, reuse the pin memory buffer, do not allocate new one
+            # Reusing pin memory only support fixed shape of checkpoints, which is registered the first time
+            assert idx < len(shared_pin_memory), (
+                f"idx {idx} should be less than shared_pin_memory length {len(shared_pin_memory)}"
+            )
+            assert shared_pin_memory[idx].size == size, (
+                f"shared_pin_memory[{idx}].size {shared_pin_memory[idx].size} should be equal to {size}"
+            )
+            return idx, shared_pin_memory[idx].buffer
+        else:
+            buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+            return idx, buffer
 
     def register_tensor(buffer: torch.Tensor, offset: int, tensor: torch.Tensor):
         buffer[offset : offset + tensor.nbytes] = tensor.view(-1).view(dtype=torch.uint8)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
         futures = [
-            executor.submit(register_pin_memory, idx, bucket.size)
+            executor.submit(
+                register_pin_memory,
+                idx,
+                bucket.size,
+                shared_pin_memory,
+            )
             for idx, bucket in enumerate(buckets)
         ]
         new_futures = []
@@ -747,6 +766,8 @@ class P2PStore:
 
 
 class ParameterServer:
+    shared_memory_pool_name = "__shared_memory_pool__"
+
     def __init__(
         self,
         *,
@@ -790,7 +811,10 @@ class ParameterServer:
         self._zmq_ctx = zmq.Context()
         self._zmq_addr_counter = 0
 
+        # stores the name of the checkpoint currently using the shared memory pool, or empty string if none
+        self._current_shared_memory_pool_user: str = ""
         self._memory_pool: dict[str, list[MemoryBuffer]] = {}
+        self._memory_pool[self.shared_memory_pool_name] = []
         # dict key is owner_rank, value is a bucket metas list in owner_rank
         self._current_global_parameter_metas: dict[int, MemoryBufferMetaList] = {}
         # NPU transfer engine initialization requires prior set_device.
@@ -804,6 +828,17 @@ class ParameterServer:
 
         self._device_uuid = _get_physical_gpu_id(self.device_manager, device_index)
         self._rdma_device = None if self._p2p_store is None else self._p2p_store.device
+
+    def _get_memory_pool(self, checkpoint_name: str) -> list[MemoryBuffer]:
+        if checkpoint_name == self._current_shared_memory_pool_user:
+            assert self._memory_pool[self.shared_memory_pool_name], (
+                f"shared memory pool is not initialized, but checkpoint {checkpoint_name} is using it"
+            )
+            return self._memory_pool[self.shared_memory_pool_name]
+        elif checkpoint_name in self._memory_pool:
+            return self._memory_pool[checkpoint_name]
+        else:
+            raise RuntimeError(f"checkpoint {checkpoint_name} is not registered")
 
     def _logger_rank0(self, msg: str):
         if self._local_rank == 0:
@@ -828,6 +863,7 @@ class ParameterServer:
         *,
         files: list[str] | None = None,
         named_tensors: dict[str, torch.Tensor] | None = None,
+        use_shared_memory_pool: bool = False,
     ) -> None:
         """
         Register a checkpoint to the parameter server. Both files and named_tensors will be registered together.
@@ -836,21 +872,46 @@ class ParameterServer:
             checkpoint_name: The name of the checkpoint.
             files: The safetensors files to register.
             named_tensors: The named tensors to register.
+            use_shared_memory_pool: If True, uses a reusable shared pin memory pool instead of allocating new memory.
+                Only one checkpoint can use the shared pool at a time. The pool's shape is fixed on first use and
+                cannot accommodate checkpoints with different memory requirements.
         """
         try:
-            assert checkpoint_name not in self._memory_pool, (
-                f"checkpoint {checkpoint_name} already registered"
-            )
-            self._memory_pool[checkpoint_name] = _register_checkpoint(
-                files=files or [], named_tensors=named_tensors or {}, rank=self._rank
-            )
-            if self._p2p_store is not None:
-                self._register_parameters_to_p2p_store(checkpoint_name)
+            if use_shared_memory_pool:
+                logger.info(
+                    f"[rank{self._rank}] checkpoint {checkpoint_name} use shared memory pool"
+                )
+                assert self._current_shared_memory_pool_user == "", (
+                    f"cannot register checkpoint {checkpoint_name} to shared memory pool, "
+                    f"since checkpoint {self._current_shared_memory_pool_user} is already using shared memory pool. "
+                    f"This registration may cause unexpected conflicts."
+                )
+                # Since we set the uninitialized shared memory pool to empty list,
+                # we can check whether this is the first time to use shared memory pool
+                _is_first_time = not self._memory_pool[self.shared_memory_pool_name]
+                self._memory_pool[self.shared_memory_pool_name] = _register_checkpoint(
+                    files=files or [],
+                    named_tensors=named_tensors or {},
+                    rank=self._rank,
+                    shared_pin_memory=self._memory_pool[self.shared_memory_pool_name],
+                )
+                self._current_shared_memory_pool_user = checkpoint_name
+                if self._p2p_store is not None and _is_first_time:
+                    self._register_parameters_to_p2p_store(checkpoint_name)
+            else:
+                assert checkpoint_name not in self._memory_pool, (
+                    f"checkpoint {checkpoint_name} already registered"
+                )
+                self._memory_pool[checkpoint_name] = _register_checkpoint(
+                    files=files or [], named_tensors=named_tensors or {}, rank=self._rank
+                )
+                if self._p2p_store is not None:
+                    self._register_parameters_to_p2p_store(checkpoint_name)
         except Exception:
             logger.exception(
                 f"[rank{self._rank}] fail to register checkpoint {checkpoint_name} with files {files}"
             )
-            if self._p2p_store is not None:
+            if self._p2p_store is not None and not use_shared_memory_pool:
                 self._unregister_parameters_from_p2p_store(checkpoint_name)
             self.unregister_checkpoint(checkpoint_name)
             raise
@@ -860,13 +921,28 @@ class ParameterServer:
         Unregister a checkpoint from the parameter server. This function will also unregister the checkpoint
         from p2p store if p2p store is initialized.
         """
-        if checkpoint_name not in self._memory_pool:
+        if (
+            checkpoint_name not in self._memory_pool
+            and checkpoint_name != self._current_shared_memory_pool_user
+        ):
+            logger.warning(
+                f"[rank{self._rank}] unregister checkpoint name {checkpoint_name} not found"
+            )
             return
+
+        # TODO: currently, we just mark the shared memory pool as unused when unregistering.
+        # Physically releasing the shared memory pool is not supported yet.
+        # We may add unregister shared memory pool logic in the future if necessary.
+        if checkpoint_name == self._current_shared_memory_pool_user:
+            self._current_shared_memory_pool_user = ""
+            return
+
         if self._p2p_store is not None:
             num_unregistered = self._unregister_parameters_from_p2p_store(checkpoint_name)
             logger.info(
                 f"[rank{self._rank}] unregister {num_unregistered} parameters from p2p store for checkpoint {checkpoint_name}"
             )
+
         del self._memory_pool[checkpoint_name]
         # see https://github.com/pytorch/pytorch/blob/31d5c675394705f8a6bc767f80ae14bf4f01246b/torch/csrc/cuda/Module.cpp#L2018
         # this works by using torch>=2.5.0
@@ -882,6 +958,10 @@ class ParameterServer:
             self.init_process_group()
         assert dist.is_initialized(), "process group is not initialized"
         metas_lst: list[DataToGather | None] = [None for _ in range(self._world_size)]  # type: ignore
+        try:
+            memory_pool = self._get_memory_pool(checkpoint_name)
+        except RuntimeError:
+            memory_pool = []
         metas = DataToGather(
             memory_buffer_metas_list=[
                 MemoryBufferMetas(
@@ -889,7 +969,7 @@ class ParameterServer:
                     ptr=x.buffer.data_ptr(),
                     size=x.size,
                 )
-                for x in self._memory_pool.get(checkpoint_name, [])
+                for x in memory_pool
             ],
             p2p_store_addr=None if self._p2p_store is None else self._p2p_store.addr,
             host_ip=get_ip(),
@@ -1095,7 +1175,7 @@ class ParameterServer:
                 remote_ptrs.append(ptrs[b.idx][0] + b.offset)
                 lens.append(b.size)
             else:
-                pool = self._memory_pool[checkpoint_name][b.idx]
+                pool = self._get_memory_pool(checkpoint_name)[b.idx]
                 buffer[offset : offset + b.size].data.copy_(
                     pool.buffer[b.offset : b.offset + b.size],
                     non_blocking=True,
@@ -1158,7 +1238,7 @@ class ParameterServer:
 
     def _register_parameters_to_p2p_store(self, checkpoint_name: str):
         assert self._p2p_store is not None, "p2p store is not initialized"
-        pool = self._memory_pool[checkpoint_name]
+        pool = self._get_memory_pool(checkpoint_name)
         if len(pool) == 0:
             return
         named_tensors, tensor_ptrs = {}, []
@@ -1169,7 +1249,7 @@ class ParameterServer:
 
     def _unregister_parameters_from_p2p_store(self, checkpoint_name: str) -> int:
         assert self._p2p_store is not None, "p2p store is not initialized"
-        pool = self._memory_pool[checkpoint_name]
+        pool = self._get_memory_pool(checkpoint_name)
         if len(pool) == 0:
             return 0
         return self._p2p_store.unregister_named_tensors(
