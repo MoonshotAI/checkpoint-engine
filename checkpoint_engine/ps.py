@@ -522,16 +522,17 @@ def _inplace_pin_memory(files: list[str], rank: int | None = None) -> list[Memor
         )
         return MemoryBuffer(buffer=buffer, size=buffer.nbytes, metas=metas)
 
-    local_memory_buffers: list[MemoryBuffer] = []
+    memory_buffers: list[MemoryBuffer] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
-        local_memory_buffers = list(executor.map(_parse_and_pin_from_safetensors, files))
-    return local_memory_buffers
+        memory_buffers = list(executor.map(_parse_and_pin_from_safetensors, files))
+    return memory_buffers
 
 
 def _normal_pin_memory(
     files: list[str],
     named_tensors: dict[str, torch.Tensor],
     rank: int | None = None,
+    shared_pin_memory: list[MemoryBuffer] | None = None,
 ) -> list[MemoryBuffer]:
     parameters = _load_checkpoint(files)
     if named_tensors:
@@ -554,27 +555,27 @@ def _normal_pin_memory(
         )
         buckets[-1].size += size
 
-    local_memory_buffers = [
+    memory_buffers = [
         MemoryBuffer(buffer=torch.empty(0), size=bucket.size, metas=bucket.metas)
         for bucket in buckets
     ]
 
-        def register_pin_memory(
-            idx: int, size: int, shared_pin_memory: list[MemoryBuffer] | None = None
-        ) -> tuple[int, torch.Tensor]:
-            if shared_pin_memory:
-                # If shared_pin_memory is provided, reuse the pin memory buffer, do not allocate new one
-                # Reusing pin memory only support fixed shape of checkpoints, which is registered the first time
-                assert idx < len(shared_pin_memory), (
-                    f"idx {idx} should be less than shared_pin_memory length {len(shared_pin_memory)}"
-                )
-                assert shared_pin_memory[idx].size == size, (
-                    f"shared_pin_memory[{idx}].size {shared_pin_memory[idx].size} should be equal to {size}"
-                )
-                return idx, shared_pin_memory[idx].buffer
-            else:
-                buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-                return idx, buffer
+    def register_pin_memory(
+        idx: int, size: int, shared_pin_memory: list[MemoryBuffer] | None = None
+    ) -> tuple[int, torch.Tensor]:
+        if shared_pin_memory:
+            # If shared_pin_memory is provided, reuse the pin memory buffer, do not allocate new one
+            # Reusing pin memory only support fixed shape of checkpoints, which is registered the first time
+            assert idx < len(shared_pin_memory), (
+                f"idx {idx} should be less than shared_pin_memory length {len(shared_pin_memory)}"
+            )
+            assert shared_pin_memory[idx].size == size, (
+                f"shared_pin_memory[{idx}].size {shared_pin_memory[idx].size} should be equal to {size}"
+            )
+            return idx, shared_pin_memory[idx].buffer
+        else:
+            buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+            return idx, buffer
 
     def register_tensor(buffer: torch.Tensor, offset: int, tensor: torch.Tensor):
         buffer[offset : offset + tensor.nbytes] = tensor.view(-1).view(dtype=torch.uint8)
@@ -595,7 +596,7 @@ def _normal_pin_memory(
             assert buffer.numel() == buckets[idx].size, (
                 f"buffer numel {buffer.numel()} should be equal to bucket size {buckets[idx].size}"
             )
-            local_memory_buffers[idx].buffer = buffer
+            memory_buffers[idx].buffer = buffer
             logger.info(
                 f"[rank{rank}] register pin_memory for bucket {idx + 1}/{len(buckets)} finished, "
                 f"size {buffer.numel() / 1024 / 1024:.2f}MiB, start to copy tensors to buffer"
@@ -612,7 +613,7 @@ def _normal_pin_memory(
                 offset += size
         for future in concurrent.futures.as_completed(new_futures):
             future.result()
-        return local_memory_buffers
+        return memory_buffers
 
 
 def _register_checkpoint(
@@ -620,6 +621,7 @@ def _register_checkpoint(
     files: list[str],
     named_tensors: dict[str, torch.Tensor],
     rank: int | None = None,
+    shared_pin_memory: list[MemoryBuffer] | None = None,
 ) -> list[MemoryBuffer]:
     logger.info(
         f"[rank{rank}] start to register checkpoint with {len(files)} files and {len(named_tensors)} named_tensors"
@@ -635,7 +637,12 @@ def _register_checkpoint(
     files_to_normal_pin = [file for file in files if file not in files_to_inplace_pin]
     if files_to_normal_pin or named_tensors:
         memory_buffers.extend(
-            _normal_pin_memory(files=files_to_normal_pin, named_tensors=named_tensors, rank=rank)
+            _normal_pin_memory(
+                files=files_to_normal_pin,
+                named_tensors=named_tensors,
+                rank=rank,
+                shared_pin_memory=shared_pin_memory,
+            )
         )
     if files_to_inplace_pin:
         memory_buffers.extend(_inplace_pin_memory(files_to_inplace_pin, rank=rank))
