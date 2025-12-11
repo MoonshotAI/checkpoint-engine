@@ -986,8 +986,8 @@ class ParameterServer:
             use_shared_memory_pool: If True, uses a reusable shared pin memory pool instead of allocating new memory.
                 Only one checkpoint can use the shared pool at a time. The pool's shape is fixed on first use and
                 cannot accommodate checkpoints with different memory requirements.
-                To free the shared pool for checkpoints with different shapes,
-                unregister the current user of the shared memory pool using `unregister_checkpoint` with `force=True`.
+                To free the actual memory of the shared pool or to modify its shape,
+                please unregister the current user of the shared memory pool using `unregister_checkpoint` with `force=True`.
         """
         try:
             if use_shared_memory_pool:
