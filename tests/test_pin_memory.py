@@ -28,6 +28,9 @@ def test_register_pin_memory():
     checkpoint_shared1 = generate_dummy_checkpoint()
     checkpoint2 = generate_dummy_checkpoint()
     checkpoint_shared2 = generate_dummy_checkpoint()
+    checkpoint_shared3 = generate_dummy_checkpoint()
+    checkpoint_shared3["layer3.weight"] = torch.randn(4096, 2048)
+    checkpoint_shared3["layer3.bias"] = torch.randn(4096)
     ps.register_checkpoint("test_checkpoint1", named_tensors=checkpoint1)
     ps.unregister_checkpoint("test_checkpoint1")
     assert "test_checkpoint1" not in ps._memory_pool
@@ -60,6 +63,15 @@ def test_register_pin_memory():
     assert "test_checkpoint1" not in ps._memory_pool
     ps.unregister_checkpoint("test_checkpoint2")
     assert "test_checkpoint2" not in ps._memory_pool
-    ps.unregister_checkpoint("test_checkpoint_shared2")
+    ps.unregister_checkpoint("test_checkpoint_shared2", force=True)
+    assert ps._current_shared_memory_pool_user == ""
+    assert "__shared_memory_pool__" in ps._memory_pool
+    ps.register_checkpoint(
+        "test_checkpoint_shared3", named_tensors=checkpoint_shared3, use_shared_memory_pool=True
+    )
+    assert "test_checkpoint_shared3" not in ps._memory_pool
+    assert "__shared_memory_pool__" in ps._memory_pool
+    assert ps._current_shared_memory_pool_user == "test_checkpoint_shared3"
+    ps.unregister_checkpoint("test_checkpoint_shared3")
     assert ps._current_shared_memory_pool_user == ""
     assert "__shared_memory_pool__" in ps._memory_pool
