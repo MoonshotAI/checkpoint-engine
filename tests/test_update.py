@@ -82,7 +82,7 @@ def checker_proc_with_error(
         try:
             trigger_error(socket_paths)
         except RuntimeError as e:
-            assert str(e) == "Failed to update weights due to remote errors"
+            assert str(e) == "Some workers failed to update weights"
 
 
 def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Tensor], queue: Queue):
@@ -177,7 +177,13 @@ def run(
             ],
         ),
         ("test_with_remote_error", [[]]),
-        # ("long_test_no_error", [list(random.sample(range(get_world_size()), k=num_ranks)) for num_ranks in range(get_world_size() + 1)]),
+        (
+            "test_no_error",
+            [
+                list(random.sample(range(get_world_size()), k=num_ranks))
+                for num_ranks in range(get_world_size() + 1)
+            ],
+        ),
     ],
 )
 def test_update(test_name: str, rank_list: list[list[int]] | None):

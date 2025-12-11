@@ -1097,7 +1097,7 @@ class ParameterServer:
                     timeout=timeout,
                     is_master=self._rank == 0,
                 )
-            # if both ranks is None or [], it will use fully broadcast to update to all ranks
+            # if ranks is None or [], it will use fully broadcast to update to all ranks
             ranks_group = dist.new_group(ranks if ranks else None)
             self._update_per_bucket(checkpoint_name, req_func, ranks_group, ranks)
             self.store_based_barrier(manager_store)
