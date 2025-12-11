@@ -1027,7 +1027,7 @@ class ParameterServer:
             self.unregister_checkpoint(checkpoint_name)
             raise
 
-    def unregister_checkpoint(self, checkpoint_name: str):
+    def unregister_checkpoint(self, checkpoint_name: str, force: bool = False) -> None:
         """
         Unregister a checkpoint from the parameter server. This function will also unregister the checkpoint
         from p2p store if p2p store is initialized.
@@ -1041,10 +1041,7 @@ class ParameterServer:
             )
             return
 
-        # TODO: currently, we just mark the shared memory pool as unused when unregistering.
-        # Physically releasing the shared memory pool is not supported yet.
-        # We may add unregister shared memory pool logic in the future if necessary.
-        if checkpoint_name == self._current_shared_memory_pool_user:
+        if checkpoint_name == self._current_shared_memory_pool_user and not force:
             self._current_shared_memory_pool_user = ""
             return
 
@@ -1054,7 +1051,12 @@ class ParameterServer:
                 f"[rank{self._rank}] unregister {num_unregistered} parameters from p2p store for checkpoint {checkpoint_name}"
             )
 
-        del self._memory_pool[checkpoint_name]
+        if checkpoint_name == self._current_shared_memory_pool_user:
+            self._current_shared_memory_pool_user = ""
+            del self._memory_pool[self.shared_memory_pool_name]
+            self._memory_pool[self.shared_memory_pool_name] = []
+        else:
+            del self._memory_pool[checkpoint_name]
         # see https://github.com/pytorch/pytorch/blob/31d5c675394705f8a6bc767f80ae14bf4f01246b/torch/csrc/cuda/Module.cpp#L2018
         # this works by using torch>=2.5.0
         torch._C._host_emptyCache()
@@ -1353,8 +1355,13 @@ class ParameterServer:
         if len(pool) == 0:
             return
         named_tensors, tensor_ptrs = {}, []
+        register_name = (
+            checkpoint_name
+            if checkpoint_name != self._current_shared_memory_pool_user
+            else self.shared_memory_pool_name
+        )
         for idx, memory_buffer in enumerate(pool):
-            named_tensors[f"memory_pool_{checkpoint_name}_{idx}"] = memory_buffer.buffer
+            named_tensors[f"memory_pool_{register_name}_{idx}"] = memory_buffer.buffer
             tensor_ptrs.append((memory_buffer.buffer.data_ptr(), memory_buffer.size))
         self._p2p_store.register_named_tensors(named_tensors)
 
@@ -1363,8 +1370,13 @@ class ParameterServer:
         pool = self._get_memory_pool(checkpoint_name)
         if len(pool) == 0:
             return 0
+        unregister_name = (
+            checkpoint_name
+            if checkpoint_name != self._current_shared_memory_pool_user
+            else self.shared_memory_pool_name
+        )
         return self._p2p_store.unregister_named_tensors(
-            [f"memory_pool_{checkpoint_name}_{idx}" for idx, _ in enumerate(pool)]
+            [f"memory_pool_{unregister_name}_{idx}" for idx, _ in enumerate(pool)]
         )
 
     def _update_per_bucket(
