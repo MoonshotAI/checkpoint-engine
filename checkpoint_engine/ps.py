@@ -868,7 +868,7 @@ class ParameterServer:
         *,
         rank: int | None = None,
         world_size: int | None = None,
-        auto_pg: bool = False,
+        auto_pg: bool = True,
         gpu_count: int | None = None,
         mem_fraction: float | None = None,
     ):
@@ -877,7 +877,7 @@ class ParameterServer:
 
         Args:
             auto_pg: Whether to automatically initialize the process group.
-                Notice that if auto_pg is True, will destroy the process group after update.
+                Notice that if auto_pg is True, will destroy the process group after update. It is recommended to set auto_pg to True!
             mem_fraction: The proportion (as a fraction) of the current free device memory for allocation.
         """
         self._rank = rank or int(os.environ.get("RANK", None))
@@ -1183,6 +1183,8 @@ class ParameterServer:
     ) -> None:
         """
         Update the checkpoint to inference engine. This function should be called after gather_metas.
+        Warning: if _auto_pg is False when initializing ParameterServer, please make sure ALL ranks in the WORLD_SIZE call `update` function,
+        otherwise, it will hang.
 
         Args:
             checkpoint_name: The name of the checkpoint.
