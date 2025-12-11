@@ -100,8 +100,9 @@ def update_weights(
     update_method: Literal["broadcast", "p2p", "all"] = "broadcast",
     uds: str | None = None,
 ):
-    ps.register_checkpoint(checkpoint_name, files=checkpoint_files, named_tensors=named_tensors)
     ps.init_process_group()
+    dist.barrier()
+    ps.register_checkpoint(checkpoint_name, files=checkpoint_files, named_tensors=named_tensors)
     check_vllm_ready(endpoint, inference_parallel_size, uds)
     dist.barrier()
     with timer("Gather metas"):
@@ -173,7 +174,9 @@ if __name__ == "__main__":
             args.uds,
         )
     else:
-        if os.path.exists(os.path.join(args.checkpoint_path, "model.safetensors.index.json")):
+        if os.path.exists(
+            os.path.join(args.checkpoint_path, "model.safetensors.index.json")
+        ) and not args.checkpoint_path.startswith("/dev/shm/"):  # noqa: S108
             named_tensors = split_tensors(args.checkpoint_path, rank, world_size)
             checkpoint_files = []
         else:

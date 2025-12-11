@@ -1,6 +1,7 @@
 import argparse
 import concurrent.futures
 import ctypes
+import json
 import os
 import pickle
 import random
@@ -18,7 +19,7 @@ import torch.distributed as dist
 import zmq
 from loguru import logger
 from pydantic import BaseModel, PlainSerializer, PlainValidator, WithJsonSchema
-from safetensors.torch import safe_open
+from safetensors.torch import _getdtype, safe_open
 from torch.multiprocessing.reductions import reduce_tensor
 
 from checkpoint_engine.device_utils import DeviceManager, get_ip, npu_generate_uuid
@@ -92,6 +93,7 @@ class ParameterMeta(BaseModel):
     name: str
     dtype: _TorchDtype
     shape: _TorchSize
+    aligned_size: int
 
 
 class BucketRange(NamedTuple):
@@ -140,7 +142,7 @@ def _align_size(dtype: torch.dtype, shape: torch.Size) -> int:
 def _to_named_tensor(metas: list[ParameterMeta], offset: int = 0) -> list[dict]:
     ret = []
     for meta in metas:
-        size = _align_size(meta.dtype, meta.shape)
+        size = meta.aligned_size
         ret.append(
             {
                 "name": meta.name,
@@ -422,6 +424,7 @@ def _load_checkpoint(files: list[str]) -> dict[str, torch.Tensor]:
                     name=parameter_name,
                     shape=meta["shape"],
                     dtype=meta["dtype"],
+                    aligned_size=_align_size(meta["dtype"], meta["shape"]),
                 )
             tp_meta = tp_metas[parameter_name]
             if tp_meta.concat_dim != -1:
@@ -431,7 +434,10 @@ def _load_checkpoint(files: list[str]) -> dict[str, torch.Tensor]:
             shape = list(parameter_metas[name].shape)
             shape[tp_meta.concat_dim] = shape[tp_meta.concat_dim] * tp_meta.size
             parameter_metas[name] = ParameterMeta(
-                name=name, shape=torch.Size(shape), dtype=parameter_metas[name].dtype
+                name=name,
+                shape=torch.Size(shape),
+                dtype=parameter_metas[name].dtype,
+                aligned_size=_align_size(parameter_metas[name].dtype, torch.Size(shape)),
             )
         weights_in_cpu = [parameters_with_tp[name][key] for key in sorted(parameters_with_tp[name])]
         # TODO: here concat is serial, which may be slow
@@ -449,18 +455,85 @@ def _load_checkpoint(files: list[str]) -> dict[str, torch.Tensor]:
     return parameters
 
 
-def _register_checkpoint(
-    *,
+def _inplace_pin_memory(files: list[str], rank: int | None = None) -> list[MemoryBuffer]:
+    def _parse_and_pin_from_safetensors(file_path: str) -> MemoryBuffer:
+        """
+        safetensors format see https://huggingface.co/docs/safetensors/en/index#format.
+        We load the safetensors file as bytes, then parse the header manually to get parameter metas.
+        The actual tensor data is in the remaining bytes and is naturally aligned.
+        We pin the remaining bytes as the buffer, making pinning faster.
+        """
+
+        def _pin(t: torch.Tensor):
+            """
+            Pin the memory of tensor in-place.
+            See: https://github.com/pytorch/pytorch/issues/32167
+            """
+            cudart = torch.cuda.cudart()
+            r = cudart.cudaHostRegister(t.data_ptr(), t.numel() * t.element_size(), 0)
+            assert r == 0, f"pin memory error, error code: {r}"
+
+        # TODO: should only support /dev/shm? but we found files in disk also work?
+        size = os.stat(file_path).st_size
+        flag_size = 8
+        t = torch.from_file(file_path, True, size, dtype=torch.uint8)
+        assert t.nbytes > flag_size, (
+            f"tensor nbytes {t.nbytes} should be greater than flag_size {flag_size}"
+        )
+        start_pos = (
+            int.from_bytes(t[0:flag_size].numpy().tobytes(), byteorder="little", signed=False)
+            + flag_size
+        )
+        header_tensor = t[flag_size:start_pos]
+        header = json.loads(header_tensor.numpy().tobytes())
+        if "__metadata__" in header:
+            header.pop("__metadata__")
+
+        metas: list[ParameterMeta] = []
+        offset = 0
+        try:
+            for name, meta in sorted(header.items(), key=lambda x: x[1]["data_offsets"]):
+                start, end = meta["data_offsets"]
+                # safetensors format ensures offsets are aligned
+                assert offset == start, f"offset {offset} should be equal to start {start}"
+                metas.append(
+                    ParameterMeta(
+                        name=name,
+                        dtype=_getdtype(meta["dtype"]),
+                        shape=torch.Size(meta["shape"]),
+                        aligned_size=end - start,
+                    )
+                )
+                offset = end
+        except Exception as e:
+            logger.error(f"fail to parse safetensors header from {file_path}: {e}")
+            raise
+
+        buffer = t[start_pos:]
+        assert offset == buffer.nbytes, (
+            f"offset {offset} should be equal to buffer.nbytes {buffer.nbytes}"
+        )
+        # Remove the file after successfully loading. This will avoid doubling the memory usage.
+        # We assume files in /dev/shm/ are temporary files. So it's safe to remove them after loading.
+        os.remove(file_path)
+        _pin(buffer)
+        logger.info(
+            f"[rank{rank}] inplace pin memory for file {file_path} finished, size {buffer.nbytes / 1024 / 1024:.2f}MiB"
+        )
+        return MemoryBuffer(buffer=buffer, size=buffer.nbytes, metas=metas)
+
+    memory_buffers: list[MemoryBuffer] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+        memory_buffers = list(executor.map(_parse_and_pin_from_safetensors, files))
+    return memory_buffers
+
+
+def _normal_pin_memory(
     files: list[str],
     named_tensors: dict[str, torch.Tensor],
     rank: int | None = None,
     shared_pin_memory: list[MemoryBuffer] | None = None,
 ) -> list[MemoryBuffer]:
-    logger.info(
-        f"[rank{rank}] start to register checkpoint with {len(files)} files and {len(named_tensors)} named_tensors"
-    )
-    if not files and not named_tensors:
-        return []
     parameters = _load_checkpoint(files)
     if named_tensors:
         parameters.update(named_tensors)
@@ -470,13 +543,16 @@ def _register_checkpoint(
         size: int
         metas: list[ParameterMeta]
 
-    buckets: list[MemoryBucket] = [MemoryBucket(size=0, metas=[])]
+    buckets: list[MemoryBucket] = []
+    buckets.append(MemoryBucket(size=0, metas=[]))
     for name, tensor in sorted(parameters.items()):
         size = _align_size(tensor.dtype, tensor.shape)
         if buckets[-1].size + size > bucket_size:
             assert buckets[-1], f"buckets[{len(buckets) - 1}] should not be empty"
             buckets.append(MemoryBucket(size=0, metas=[]))
-        buckets[-1].metas.append(ParameterMeta(name=name, shape=tensor.shape, dtype=tensor.dtype))
+        buckets[-1].metas.append(
+            ParameterMeta(name=name, shape=tensor.shape, dtype=tensor.dtype, aligned_size=size)
+        )
         buckets[-1].size += size
 
     memory_buffers = [
@@ -537,6 +613,39 @@ def _register_checkpoint(
                 offset += size
         for future in concurrent.futures.as_completed(new_futures):
             future.result()
+        return memory_buffers
+
+
+def _register_checkpoint(
+    *,
+    files: list[str],
+    named_tensors: dict[str, torch.Tensor],
+    rank: int | None = None,
+    shared_pin_memory: list[MemoryBuffer] | None = None,
+) -> list[MemoryBuffer]:
+    logger.info(
+        f"[rank{rank}] start to register checkpoint with {len(files)} files and {len(named_tensors)} named_tensors"
+    )
+    if not files and not named_tensors:
+        return []
+    memory_buffers: list[MemoryBuffer] = []
+    files_to_inplace_pin = [
+        file
+        for file in files
+        if file.startswith("/dev/shm/") and file.endswith(".safetensors")  # noqa: S108
+    ]
+    files_to_normal_pin = [file for file in files if file not in files_to_inplace_pin]
+    if files_to_normal_pin or named_tensors:
+        memory_buffers.extend(
+            _normal_pin_memory(
+                files=files_to_normal_pin,
+                named_tensors=named_tensors,
+                rank=rank,
+                shared_pin_memory=shared_pin_memory,
+            )
+        )
+    if files_to_inplace_pin:
+        memory_buffers.extend(_inplace_pin_memory(files_to_inplace_pin, rank=rank))
     return memory_buffers
 
 
@@ -585,7 +694,7 @@ def _gen_h2d_buckets(
         for idx, metas in enumerate(items.memory_buffer_metas_list):
             start_offset, offset = 0, 0
             for meta in metas.metas:
-                s = _align_size(meta.dtype, meta.shape)
+                s = meta.aligned_size
                 if buckets[-1][1].size + s > bucket_size:
                     if offset - start_offset > 0:
                         buckets[-1][1].ranges.append(
@@ -867,6 +976,8 @@ class ParameterServer:
     ) -> None:
         """
         Register a checkpoint to the parameter server. Both files and named_tensors will be registered together.
+        Warning: .safetensors files in /dev/shm/ will be pinned in-place, and the files will be REMOVED after pinning.
+        Please make sure to copy the files to disks if you need to keep them.
 
         Args:
             checkpoint_name: The name of the checkpoint.
@@ -1138,7 +1249,7 @@ class ParameterServer:
         for items in self._current_global_parameter_metas.values():
             for metas_list in items.memory_buffer_metas_list:
                 for meta in metas_list.metas:
-                    max_tensor_bytes = max(max_tensor_bytes, _align_size(meta.dtype, meta.shape))
+                    max_tensor_bytes = max(max_tensor_bytes, meta.aligned_size)
         free_bytes_divided_3 = free_bytes // (3 * _ALIGN_SIZE) * _ALIGN_SIZE
         if max_tensor_bytes <= free_bytes_divided_3 and not disable_h2d_buffer:
             self._logger_rank0(f"[rank{self._rank}] use h2d buffer")
