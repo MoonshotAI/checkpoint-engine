@@ -1,21 +1,17 @@
-import argparse
 import ctypes
 import os
 import threading
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, BinaryIO
+from typing import TYPE_CHECKING
 
-import httpx
 import torch
 import torch.distributed as dist
 import zmq
 from loguru import logger
-from pydantic import BaseModel
 from torch.multiprocessing.reductions import reduce_tensor
 
-import httpx
 from checkpoint_engine.api import _init_api
 from checkpoint_engine.data_types import (
     BucketRange,
@@ -59,37 +55,6 @@ def _get_physical_gpu_id(device_manager: DeviceManager, device_index: int | None
             return f"GPU-{device_manager.device_module.get_device_properties(device_index).uuid!s}"
     except AssertionError as e:
         raise ValueError(f"fail to get physical gpu id {device_index}") from e
-
-
-def request_inference_to_update(
-    url: str,
-    socket_paths: dict[str, str],
-    timeout: float = 300.0,
-    uds: str | None = None,
-):
-    """Send an inference update request to inference server via HTTP or Unix socket.
-
-    Args:
-        url (str): The HTTP URL or request path (e.g., "http://localhost:19730/inference") to send the request to.
-        socket_paths (dict[str, str]): A dictionary containing device uuid and IPC socket paths for updating weights.
-        timeout (float, optional): Request timeout in seconds. Defaults to 300.0.
-        uds (str, optional): Path to a Unix domain socket. If provided, the request
-            will be sent via the Unix socket instead of HTTP. Defaults to None.
-
-    Raises:
-        httpx.HTTPStatusError: If the response contains an HTTP error status.
-        httpx.RequestError: If there was an issue while making the request.
-    """
-    resp = httpx.Client(transport=httpx.HTTPTransport(uds=uds)).post(
-        url,
-        json={
-            "method": "update_weights_from_ipc",
-            "args": [socket_paths],
-            "timeout": timeout,
-        },
-        timeout=timeout,
-    )
-    resp.raise_for_status()
 
 
 def _gen_h2d_buckets(
@@ -888,24 +853,3 @@ class ParameterServer:
                 self._p2p_store.unregister_named_tensors([h2d_buffer_name])
 
             self.device_manager.device_module.empty_cache()
-
-
-@logger.catch(reraise=True)
-def run_from_cli():
-    import uvicorn
-
-    parser = argparse.ArgumentParser(description="Parameter Server")
-    parser.add_argument("--uds", type=str)
-
-    args = parser.parse_args()
-    logger.info(
-        f"Parameter Server {args=}, master addr: {os.getenv('MASTER_ADDR')}, master port {os.getenv('MASTER_PORT')}"
-    )
-
-    assert args.uds and len(args.uds) > 0, args.uds
-    ps = ParameterServer(auto_pg=True)
-    uvicorn.run(_init_api(ps), uds=args.uds, timeout_keep_alive=60)
-
-
-if __name__ == "__main__":
-    run_from_cli()
