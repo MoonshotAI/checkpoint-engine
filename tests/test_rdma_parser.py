@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from checkpoint_engine.ps import (
+from checkpoint_engine.p2p_store import (
     _get_my_rdma_device,
     _get_rdma_devices,
     _ibv_get_device_list,
@@ -42,7 +42,9 @@ def test_get_rdma_devices_no_env_vars(mock_available_devices: list[str]):
     """Test _get_rdma_devices with no environment variables"""
     with (
         patch.dict(os.environ, clear=True),
-        patch("checkpoint_engine.ps._ibv_get_device_list", return_value=mock_available_devices),
+        patch(
+            "checkpoint_engine.p2p_store._ibv_get_device_list", return_value=mock_available_devices
+        ),
     ):
         devices = _get_rdma_devices()
         assert sorted(devices) == sorted(mock_available_devices)
@@ -121,7 +123,7 @@ def test_parse_exact_match_with_nonexistent_device(
     mock_available_devices: list[str],
 ):
     """Test exact matching with non-existent device"""
-    with patch("checkpoint_engine.ps.logger") as mock_logger:
+    with patch("checkpoint_engine.p2p_store.logger") as mock_logger:
         result = _parse_NCCL_IB_HCA(input_value, mock_available_devices)
         assert result == expected_result
         mock_logger.warning.assert_called_once_with(expected_warning)
@@ -148,7 +150,9 @@ def test_get_rdma_devices_with_env_vars(
     env_dict = {env_var_name: env_var_value}
     with (
         patch.dict(os.environ, env_dict),
-        patch("checkpoint_engine.ps._ibv_get_device_list", return_value=mock_available_devices),
+        patch(
+            "checkpoint_engine.p2p_store._ibv_get_device_list", return_value=mock_available_devices
+        ),
     ):
         devices = _get_rdma_devices()
         assert sorted(devices) == sorted(expected_devices)
