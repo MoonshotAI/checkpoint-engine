@@ -5,15 +5,27 @@ import threading
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 import httpx
 import torch
 import torch.distributed as dist
 import zmq
 from loguru import logger
-
+from pydantic import BaseModel
 from torch.multiprocessing.reductions import reduce_tensor
+
+import httpx
+from checkpoint_engine.api import _init_api
+from checkpoint_engine.data_types import (
+    BucketRange,
+    DataToGather,
+    H2DBucket,
+    MemoryBuffer,
+    MemoryBufferMetaList,
+    MemoryBufferMetas,
+    ParameterMeta,
+)
 
 from checkpoint_engine.device_utils import DeviceManager, get_ip, npu_generate_uuid
 from checkpoint_engine.p2p_store import P2PStore
@@ -876,63 +888,6 @@ class ParameterServer:
                 self._p2p_store.unregister_named_tensors([h2d_buffer_name])
 
             self.device_manager.device_module.empty_cache()
-
-
-def _init_api(ps: ParameterServer) -> Any:
-    import fastapi
-    from fastapi import Request
-    from fastapi.responses import JSONResponse, Response
-
-    app = fastapi.FastAPI()
-
-    class RegisterRequest(BaseModel):
-        files: list[str]
-
-    class UpdateRequest(BaseModel):
-        ranks: list[int] = []
-        update_url: str | None = None
-        inference_group_ranks: list[int] = []
-        timeout: float = 300.0
-        uds: str | None = None
-
-    def wrap_exception(func: Callable[[], None]) -> Response:
-        try:
-            func()
-        except Exception as e:  # noqa: BLE001
-            logger.exception(f"wrap exception {func} failed")
-            return JSONResponse(content=str(e), status_code=500)
-        return Response(status_code=200)
-
-    @app.post("/v1/checkpoints/{checkpoint_name}/files")
-    async def register_files(checkpoint_name: str, req: RegisterRequest, raw: Request) -> Response:
-        return wrap_exception(lambda: ps.register_checkpoint(checkpoint_name, files=req.files))
-
-    @app.delete("/v1/checkpoints/{checkpoint_name}")
-    async def unregister_checkpoint(checkpoint_name: str) -> Response:
-        return wrap_exception(lambda: ps.unregister_checkpoint(checkpoint_name))
-
-    @app.get("/v1/healthz")
-    async def healthz() -> Response:
-        return Response(status_code=200)
-
-    @app.post("/v1/checkpoints/{checkpoint_name}/gather-metas")
-    async def gather_metas(checkpoint_name: str) -> Response:
-        return wrap_exception(lambda: ps.gather_metas(checkpoint_name))
-
-    @app.post("/v1/checkpoints/{checkpoint_name}/update")
-    async def update(checkpoint_name: str, req: UpdateRequest) -> Response:
-        def update_func(socket_paths: list[tuple[str, str]]):
-            if req.update_url is None:
-                return
-            if req.inference_group_ranks:
-                socket_paths = [socket_paths[i] for i in req.inference_group_ranks]
-            request_inference_to_update(
-                req.update_url, dict(socket_paths), timeout=req.timeout, uds=req.uds
-            )
-
-        return wrap_exception(lambda: ps.update(checkpoint_name, update_func, ranks=req.ranks))
-
-    return app
 
 
 @logger.catch(reraise=True)
