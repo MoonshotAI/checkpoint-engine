@@ -237,7 +237,13 @@ def run_with_files(
             ],
         ),
         ("test_with_remote_error", [[]]),
-        # ("long_test_no_error", [list(random.sample(range(get_world_size()), k=num_ranks)) for num_ranks in range(get_world_size() + 1)]),
+        (
+            "test_no_error",
+            [
+                list(random.sample(range(get_world_size()), k=num_ranks))
+                for num_ranks in range(get_world_size() + 1)
+            ],
+        ),
     ],
 )
 def test_update(test_name: str, rank_list: list[list[int]] | None):
