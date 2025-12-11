@@ -12,7 +12,6 @@ import zmq
 from loguru import logger
 from torch.multiprocessing.reductions import reduce_tensor
 
-from checkpoint_engine.api import _init_api
 from checkpoint_engine.data_types import (
     BucketRange,
     DataToGather,
@@ -22,7 +21,6 @@ from checkpoint_engine.data_types import (
     MemoryBufferMetas,
     ParameterMeta,
 )
-
 from checkpoint_engine.device_utils import DeviceManager, get_ip, npu_generate_uuid
 from checkpoint_engine.p2p_store import P2PStore
 from checkpoint_engine.pin_memory import _ALIGN_SIZE, _register_checkpoint
@@ -30,6 +28,7 @@ from checkpoint_engine.pin_memory import _ALIGN_SIZE, _register_checkpoint
 
 if TYPE_CHECKING:
     from checkpoint_engine.data_types import T
+
 
 def _to_named_tensor(metas: list[ParameterMeta], offset: int = 0) -> list[dict]:
     ret = []
