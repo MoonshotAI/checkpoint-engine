@@ -986,6 +986,8 @@ class ParameterServer:
             use_shared_memory_pool: If True, uses a reusable shared pin memory pool instead of allocating new memory.
                 Only one checkpoint can use the shared pool at a time. The pool's shape is fixed on first use and
                 cannot accommodate checkpoints with different memory requirements.
+                To free the actual memory of the shared pool or to modify its shape,
+                please unregister the current user of the shared memory pool using `unregister_checkpoint` with `force=True`.
         """
         try:
             if use_shared_memory_pool:
@@ -1031,6 +1033,10 @@ class ParameterServer:
         """
         Unregister a checkpoint from the parameter server. This function will also unregister the checkpoint
         from p2p store if p2p store is initialized.
+        Args:
+            checkpoint_name: The name of the checkpoint.
+            force: This flag is designed for shared memory pool user. If True, the memory for shared memory pool itself will be freed.
+                    If False, only the checkpoint name will be unregistered, and the shared memory pool will be kept for future use.
         """
         if (
             checkpoint_name not in self._memory_pool
