@@ -117,7 +117,7 @@ def _concat_tp_weights(
     tp_weights: list[torch.Tensor], tp_concat_dim: int, tp_size: int
 ) -> torch.Tensor:
     """Concat tp weights with meta info.
-    If meta.concat_dim is -1, meas this is shared tp weights, just use the first weights.
+    If meta.concat_dim is -1, means this is shared tp weights, just use the first weights.
     Else we will cat weights in concat_dim.
     """
     if tp_concat_dim == -1:
