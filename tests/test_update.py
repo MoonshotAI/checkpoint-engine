@@ -218,7 +218,8 @@ def run_with_files(
     if rank == 0:
         import shutil
 
-        os.removedirs(dev_shm_dir)
+        # this test should be run under use_inplace_pin_memory=False. Otherwise, the files in /dev/shm/ will be deleted.
+        shutil.rmtree(dev_shm_dir)
         shutil.rmtree(disk_dir)
     assert proc.exitcode == 0
 
