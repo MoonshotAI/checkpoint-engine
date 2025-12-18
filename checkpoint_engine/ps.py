@@ -622,6 +622,7 @@ def _register_checkpoint(
     named_tensors: dict[str, torch.Tensor],
     rank: int | None = None,
     shared_pin_memory: list[MemoryBuffer] | None = None,
+    inplace_pin: bool = False,
 ) -> list[MemoryBuffer]:
     logger.info(
         f"[rank{rank}] start to register checkpoint with {len(files)} files and {len(named_tensors)} named_tensors"
@@ -629,12 +630,17 @@ def _register_checkpoint(
     if not files and not named_tensors:
         return []
     memory_buffers: list[MemoryBuffer] = []
-    files_to_inplace_pin = [
-        file
-        for file in files
-        if file.startswith("/dev/shm/") and file.endswith(".safetensors")  # noqa: S108
-    ]
-    files_to_normal_pin = [file for file in files if file not in files_to_inplace_pin]
+    if inplace_pin:
+        logger.info(f"[rank{rank}] allow inplace pin memory for /dev/shm/ safetensors files")
+        files_to_inplace_pin = [
+            file
+            for file in files
+            if file.startswith("/dev/shm/") and file.endswith(".safetensors")  # noqa: S108
+        ]
+        files_to_normal_pin = [file for file in files if file not in files_to_inplace_pin]
+    else:
+        files_to_normal_pin = files
+        files_to_inplace_pin = []
     if files_to_normal_pin or named_tensors:
         memory_buffers.extend(
             _normal_pin_memory(
@@ -959,10 +965,11 @@ class ParameterServer:
         files: list[str] | None = None,
         named_tensors: dict[str, torch.Tensor] | None = None,
         use_shared_memory_pool: bool = False,
+        use_inplace_pin_memory: bool = False,
     ) -> None:
         """
         Register a checkpoint to the parameter server. Both files and named_tensors will be registered together.
-        Warning: .safetensors files in /dev/shm/ will be pinned in-place, and the files will be REMOVED after pinning.
+        Warning: if `use_inplace_pin_memory` is True, .safetensors files in /dev/shm/ will be pinned in-place, and the files will be REMOVED after pinning.
         Please make sure to copy the files to disks if you need to keep them.
 
         Args:
@@ -974,6 +981,8 @@ class ParameterServer:
                 cannot accommodate checkpoints with different memory requirements.
                 To free the actual memory of the shared pool or to modify its shape,
                 please unregister the current user of the shared memory pool using `unregister_checkpoint` with `force=True`.
+            use_inplace_pin_memory: If True, allows inplace pin memory for /dev/shm/ safetensors files. This option is ignored when ``use_shared_memory_pool`` is True.
+                Currently, this feature is experimental and may crash.
         """
         try:
             if use_shared_memory_pool:
@@ -1002,7 +1011,10 @@ class ParameterServer:
                     f"checkpoint {checkpoint_name} already registered"
                 )
                 self._memory_pool[checkpoint_name] = _register_checkpoint(
-                    files=files or [], named_tensors=named_tensors or {}, rank=self._rank
+                    files=files or [],
+                    named_tensors=named_tensors or {},
+                    rank=self._rank,
+                    inplace_pin=use_inplace_pin_memory,
                 )
                 if self._p2p_store is not None:
                     self._register_parameters_to_p2p_store(checkpoint_name)
