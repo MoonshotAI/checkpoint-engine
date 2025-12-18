@@ -982,7 +982,7 @@ class ParameterServer:
                 To free the actual memory of the shared pool or to modify its shape,
                 please unregister the current user of the shared memory pool using `unregister_checkpoint` with `force=True`.
             use_inplace_pin_memory: If True, allows inplace pin memory for /dev/shm/ safetensors files.
-                Currently, this feature is experimental and may crush.
+                Currently, this feature is experimental and may crash.
         """
         try:
             if use_shared_memory_pool:
