@@ -1278,7 +1278,7 @@ class ParameterServer:
                     is_master=self._rank == 0,
                 )
             # if ranks is None or [], it will use fully broadcast to update to all ranks
-            ranks_group = dist.new_group(ranks if ranks else None)
+            ranks_group = dist.new_group(ranks) if ranks else None
             self._update_per_bucket(checkpoint_name, req_func, ranks_group, ranks)
             self.store_based_barrier(manager_store)
         except Exception as e:
@@ -1309,7 +1309,7 @@ class ParameterServer:
         return socket, socket_paths
 
     def _detect_bucket_size(
-        self, ranks_group: dist.ProcessGroup, *, disable_h2d_buffer: bool = False
+        self, ranks_group: dist.ProcessGroup | None, *, disable_h2d_buffer: bool = False
     ) -> tuple[int, bool]:
         GiB = 1 << 30  # noqa: N806
         # auto detect bucket size
@@ -1428,7 +1428,7 @@ class ParameterServer:
         self,
         checkpoint_name: str,
         req_func: Callable[[list[tuple[str, str]]], None],
-        ranks_group: dist.ProcessGroup,
+        ranks_group: dist.ProcessGroup | None,
         ranks: list[int] | None = None,
     ):
         assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"
