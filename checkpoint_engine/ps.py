@@ -985,9 +985,9 @@ class ParameterServer:
             use_inplace_pin_memory: If True (default), allows inplace pin memory for /dev/shm/ safetensors files.
                 This option is ignored when ``use_shared_memory_pool`` is True.
         """
-        if self.device_manager.device_type == "npu" and use_inplace_pin_memory:
+        if self.device_manager.device_type != "cuda" and use_inplace_pin_memory:
             logger.warning(
-                f"[rank{self._rank}] NPU device does not support inplace pin memory yet, set use_inplace_pin_memory to False"
+                f"[rank{self._rank}] Only cuda devices support in-place pin memory, set use_inplace_pin_memory to False"
             )
             use_inplace_pin_memory = False
         try:
