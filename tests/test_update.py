@@ -217,7 +217,7 @@ def run_with_files(
     if rank == 0:
         import shutil
 
-        os.removedirs(dev_shm_dir)
+        shutil.rmtree(dev_shm_dir)
         shutil.rmtree(disk_dir)
     assert proc.exitcode == 0
 

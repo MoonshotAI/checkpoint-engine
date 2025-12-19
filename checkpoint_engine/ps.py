@@ -1008,6 +1008,7 @@ class ParameterServer:
                     named_tensors=named_tensors or {},
                     rank=self._rank,
                     shared_pin_memory=self._memory_pool[self.shared_memory_pool_name],
+                    inplace_pin=False,  # inplace pin memory is not compatible with shared memory pool
                 )
                 self._current_shared_memory_pool_user = checkpoint_name
                 if self._p2p_store is not None and _is_first_time:
@@ -1082,16 +1083,30 @@ class ParameterServer:
                     raise
                 r = cuda_host_get_flags(ctypes.byref(p_flags), ctypes.c_void_p(t.data_ptr()))
                 assert r == 0, f"get pin flags error, error code: {r}"
-                assert p_flags.value == 2, f"memory is not pinned, flags: {p_flags.value}"
+                # p_flags value meaning from cuda/include/driver_types.h
+                # cudaHostRegisterDefault             0x00  /**< Default host memory registration flag */
+                # cudaHostRegisterPortable            0x01  /**< Pinned memory accessible by all CUDA contexts */
+                # cudaHostRegisterMapped              0x02  /**< Map registered memory into device space */
+                # cudaHostRegisterIoMemory            0x04  /**< Memory-mapped I/O space */
+                # cudaHostRegisterReadOnly            0x08  /**< Memory-mapped read-only */
+                assert p_flags.value == 0x02, (
+                    f"pin memory flag error, expected: 0x02 (cudaHostRegisterMapped), got flag: {p_flags.value}"
+                )
                 cudart = torch.cuda.cudart()
                 r = cudart.cudaHostUnregister(t.data_ptr())
                 assert r == 0, f"unpin memory error, error code: {r}"
 
             # if the checkpoint is pinned by cudaHostRegister manually, we need to unpin it manually
-            for memory_buffer in self._memory_pool.get(checkpoint_name, []):
-                if memory_buffer.manually_pinned:
-                    _unpin(memory_buffer.buffer)
-
+            try:
+                for memory_buffer in self._memory_pool.get(checkpoint_name, []):
+                    if memory_buffer.manually_pinned:
+                        _unpin(memory_buffer.buffer)
+            except Exception as e:
+                logger.error(
+                    f"[rank{self._rank}] fail to unpin memory for checkpoint {checkpoint_name}: {e}"
+                )
+                raise
+            # we won't delete the memory pool if unpinning fails.
             del self._memory_pool[checkpoint_name]
         # see https://github.com/pytorch/pytorch/blob/31d5c675394705f8a6bc767f80ae14bf4f01246b/torch/csrc/cuda/Module.cpp#L2018
         # this works by using torch>=2.5.0

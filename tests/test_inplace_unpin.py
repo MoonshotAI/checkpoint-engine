@@ -9,13 +9,15 @@ from test_update import device_manager, gen_test_tensors, get_world_size
 from checkpoint_engine.ps import ParameterServer
 
 
+dev_shm_dir = "/dev/shm/checkpoint_engine_tests"  # noqa: S108
+
+
 def get_files() -> list[str]:
     rank = int(os.getenv("RANK"))
     named_tensors = dict(gen_test_tensors(rank))
     import safetensors.torch
 
     files = []
-    dev_shm_dir = "/dev/shm/checkpoint_engine_tests"  # noqa: S108
     os.makedirs(dev_shm_dir, exist_ok=True)
     tensors_in_dev_shm = named_tensors
     time.sleep(1)
@@ -38,6 +40,11 @@ def run_pin_and_unpin(num_runs: int):
         ps.gather_metas(checkpoint_name)
         dist.barrier()
         ps.unregister_checkpoint(checkpoint_name)
+    if ps._rank == 0:
+        import shutil
+
+        shutil.rmtree(dev_shm_dir)
+
     dist.destroy_process_group()
 
 
