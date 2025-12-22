@@ -852,3 +852,10 @@ class ParameterServer:
                 self._p2p_store.unregister_named_tensors([h2d_buffer_name])
 
             self.device_manager.device_module.empty_cache()
+
+
+# we need this CLI entry point for compatibility with former versions
+if __name__ == "__main__":
+    from .__main__ import run_from_cli
+
+    run_from_cli()
