@@ -1,16 +1,14 @@
-from __future__ import annotations
+from collections.abc import Callable
+from typing import Any
 
-from typing import TYPE_CHECKING, Any
-
+import fastapi
 import httpx
+from fastapi import Request
+from fastapi.responses import JSONResponse, Response
 from loguru import logger
 from pydantic import BaseModel
 
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from checkpoint_engine.ps import ParameterServer
+from checkpoint_engine.ps import ParameterServer
 
 
 def request_inference_to_update(
@@ -45,10 +43,6 @@ def request_inference_to_update(
 
 
 def _init_api(ps: ParameterServer) -> Any:
-    import fastapi
-    from fastapi import Request
-    from fastapi.responses import JSONResponse, Response
-
     app = fastapi.FastAPI()
 
     class RegisterRequest(BaseModel):
