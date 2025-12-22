@@ -118,6 +118,7 @@ class MemoryBuffer(BaseModel):
     buffer: _TorchTensor
     size: int
     metas: list[ParameterMeta]
+    manually_pinned: bool = False
 
 
 class MemoryBufferMetaList(BaseModel):
@@ -520,7 +521,7 @@ def _inplace_pin_memory(files: list[str], rank: int | None = None) -> list[Memor
         logger.info(
             f"[rank{rank}] inplace pin memory for file {file_path} finished, size {buffer.nbytes / 1024 / 1024:.2f}MiB"
         )
-        return MemoryBuffer(buffer=buffer, size=buffer.nbytes, metas=metas)
+        return MemoryBuffer(buffer=buffer, size=buffer.nbytes, metas=metas, manually_pinned=True)
 
     memory_buffers: list[MemoryBuffer] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
@@ -965,12 +966,12 @@ class ParameterServer:
         files: list[str] | None = None,
         named_tensors: dict[str, torch.Tensor] | None = None,
         use_shared_memory_pool: bool = False,
-        use_inplace_pin_memory: bool = False,
+        use_inplace_pin_memory: bool = True,
     ) -> None:
         """
         Register a checkpoint to the parameter server. Both files and named_tensors will be registered together.
         Warning: if `use_inplace_pin_memory` is True, .safetensors files in /dev/shm/ will be pinned in-place, and the files will be REMOVED after pinning.
-        Please make sure to copy the files to disks if you need to keep them.
+        Please make sure to copy the files to disks if you need to keep them. NPU does not support inplace pin memory.
 
         Args:
             checkpoint_name: The name of the checkpoint.
@@ -981,9 +982,14 @@ class ParameterServer:
                 cannot accommodate checkpoints with different memory requirements.
                 To free the actual memory of the shared pool or to modify its shape,
                 please unregister the current user of the shared memory pool using `unregister_checkpoint` with `force=True`.
-            use_inplace_pin_memory: If True, allows inplace pin memory for /dev/shm/ safetensors files. This option is ignored when ``use_shared_memory_pool`` is True.
-                Currently, this feature is experimental and may crash.
+            use_inplace_pin_memory: If True (default), allows inplace pin memory for /dev/shm/ safetensors files.
+                This option is ignored when ``use_shared_memory_pool`` is True.
         """
+        if self.device_manager.device_type != "cuda" and use_inplace_pin_memory:
+            logger.warning(
+                f"[rank{self._rank}] Only cuda devices support in-place pin memory, set use_inplace_pin_memory to False"
+            )
+            use_inplace_pin_memory = False
         try:
             if use_shared_memory_pool:
                 logger.info(
@@ -1002,6 +1008,7 @@ class ParameterServer:
                     named_tensors=named_tensors or {},
                     rank=self._rank,
                     shared_pin_memory=self._memory_pool[self.shared_memory_pool_name],
+                    inplace_pin=False,  # inplace pin memory is not compatible with shared memory pool
                 )
                 self._current_shared_memory_pool_user = checkpoint_name
                 if self._p2p_store is not None and _is_first_time:
@@ -1060,6 +1067,46 @@ class ParameterServer:
             del self._memory_pool[self.shared_memory_pool_name]
             self._memory_pool[self.shared_memory_pool_name] = []
         else:
+
+            def _unpin(t: torch.Tensor):
+                """
+                Un-pin the pinned memory.
+                """
+                p_flags = ctypes.c_uint()
+                try:
+                    libc = ctypes.CDLL(None)  # get all symbols from the current process
+                    cuda_host_get_flags = libc.cudaHostGetFlags
+                    cuda_host_get_flags.argtypes = [ctypes.POINTER(ctypes.c_uint), ctypes.c_void_p]
+                    cuda_host_get_flags.restype = ctypes.c_int
+                except AttributeError:
+                    logger.error("cudaHostGetFlags not found in libc, cannot unpin memory manually")
+                    raise
+                r = cuda_host_get_flags(ctypes.byref(p_flags), ctypes.c_void_p(t.data_ptr()))
+                assert r == 0, f"get pin flags error, error code: {r}"
+                # p_flags value meaning from cuda/include/driver_types.h
+                # cudaHostRegisterDefault             0x00  /**< Default host memory registration flag */
+                # cudaHostRegisterPortable            0x01  /**< Pinned memory accessible by all CUDA contexts */
+                # cudaHostRegisterMapped              0x02  /**< Map registered memory into device space */
+                # cudaHostRegisterIoMemory            0x04  /**< Memory-mapped I/O space */
+                # cudaHostRegisterReadOnly            0x08  /**< Memory-mapped read-only */
+                assert p_flags.value == 0x02, (
+                    f"pin memory flag error, expected: 0x02 (cudaHostRegisterMapped), got flag: {p_flags.value}"
+                )
+                cudart = torch.cuda.cudart()
+                r = cudart.cudaHostUnregister(t.data_ptr())
+                assert r == 0, f"unpin memory error, error code: {r}"
+
+            # if the checkpoint is pinned by cudaHostRegister manually, we need to unpin it manually
+            try:
+                for memory_buffer in self._memory_pool.get(checkpoint_name, []):
+                    if memory_buffer.manually_pinned:
+                        _unpin(memory_buffer.buffer)
+            except Exception as e:
+                logger.error(
+                    f"[rank{self._rank}] fail to unpin memory for checkpoint {checkpoint_name}: {e}"
+                )
+                raise
+            # we won't delete the memory pool if unpinning fails.
             del self._memory_pool[checkpoint_name]
         # see https://github.com/pytorch/pytorch/blob/31d5c675394705f8a6bc767f80ae14bf4f01246b/torch/csrc/cuda/Module.cpp#L2018
         # this works by using torch>=2.5.0

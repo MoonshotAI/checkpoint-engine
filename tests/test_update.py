@@ -185,7 +185,6 @@ def run_with_files(
     os.makedirs(dev_shm_dir, exist_ok=True)
     os.makedirs(disk_dir, exist_ok=True)
     tensors_items = list(named_tensors.items())
-    tensors_in_dev_shm = named_tensors
     tensors_in_dev_shm = dict(tensors_items[: len(tensors_items) // 2])
     tensors_in_disk = dict(tensors_items[len(tensors_items) // 3 : 2 * len(tensors_items) // 3])
     tensors_in_memory = dict(tensors_items[1 * len(tensors_items) // 2 :])
@@ -218,7 +217,6 @@ def run_with_files(
     if rank == 0:
         import shutil
 
-        # this test should be run under use_inplace_pin_memory=False. Otherwise, the files in /dev/shm/ will be deleted.
         shutil.rmtree(dev_shm_dir)
         shutil.rmtree(disk_dir)
     assert proc.exitcode == 0
