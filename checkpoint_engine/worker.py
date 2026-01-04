@@ -151,15 +151,18 @@ class VllmColocateWorkerExtension:
         assert self.device is not None
         if not hasattr(self, "_zmq_ctx") or self._zmq_ctx is None:
             self._zmq_ctx = zmq.Context()
-        if current_platform.device_type == "cuda":
-            device_uuid = current_platform.get_device_uuid(self.device.index)
-        elif current_platform.device_type == "npu":
-            device_uuid = f"NPU-{npu_generate_uuid()}"
-        else:
-            raise ValueError(f"Unsupported device type: {current_platform.device_type}")
+
+        if not hasattr(self, "_device_uuid") or self._device_uuid is None:
+            if current_platform.device_type == "cuda":
+                self._device_uuid = current_platform.get_device_uuid(self.device.index)
+            elif current_platform.device_type == "npu":
+                self._device_uuid = f"NPU-{npu_generate_uuid()}"
+            else:
+                raise ValueError(f"Unsupported device type: {current_platform.device_type}")
+
         update_weights_from_ipc(
             self._zmq_ctx,
-            zmq_handles[device_uuid],
+            zmq_handles[self._device_uuid],
             device_id=self.device.index,
             run=self.model_runner.model.load_weights,
             post_hook=lambda: process_weights_after_loading(
