@@ -158,7 +158,9 @@ def _get_master_port(master_port: int | None = None) -> int:
     if master_port is None:
         # HACK: use MASTER_PORT + 1 as master_port, avoid conflict with torchrun's rendezvous port
         # TODO: check whether master_port is available or use a more elegant way
-        master_port = int(os.getenv("MASTER_PORT")) + 1
+        master_port_str = os.getenv("MASTER_PORT")
+        assert master_port_str, "MASTER_PORT is required if no master_port is provided."
+        master_port = int(master_port_str) + 1
     return master_port
 
 
@@ -182,8 +184,8 @@ class ParameterServer:
                 Notice that if auto_pg is True, will destroy the process group after update. It is recommended to set auto_pg to True!
             mem_fraction: The proportion (as a fraction) of the current free device memory for allocation.
         """
-        self._rank = rank or int(os.environ.get("RANK", None))
-        self._world_size = world_size or int(os.environ.get("WORLD_SIZE", None))
+        self._rank = rank or int(os.environ["RANK"])
+        self._world_size = world_size or int(os.environ["WORLD_SIZE"])
         self.device_manager = DeviceManager()
         self._gpu_count = gpu_count or self.device_manager.device_module.device_count()
         self._local_rank = self._rank % self._gpu_count
@@ -192,7 +194,7 @@ class ParameterServer:
         self._global_device_uuids: list[str] = []
         self._local_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._remote_rdma_devices: dict[str, set[int]] = defaultdict(set)
-        self._mem_fraction = mem_fraction or 0.9
+        self._mem_fraction = mem_fraction or float(os.getenv("PS_MEM_FRACTION", "0.9"))
 
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
@@ -647,7 +649,7 @@ class ParameterServer:
                 f"max_tensor_bytes {max_tensor_bytes} should be less than free_bytes {free_bytes}"
             )
             disable_h2d_buffer = True
-        max_bytes = int(os.getenv("PS_MAX_BUCKET_SIZE_GB", 8)) * GiB
+        max_bytes = int(float(os.getenv("PS_MAX_BUCKET_SIZE_GB", "8")) * GiB)
         bucket_size = min(max(max_bytes, max_tensor_bytes), free_bytes)
         logger.info(f"[rank{self._rank}] auto detect bucket size {bucket_size / GiB:.2f} GiB")
         return bucket_size, disable_h2d_buffer

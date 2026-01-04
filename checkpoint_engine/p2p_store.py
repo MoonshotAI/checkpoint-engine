@@ -140,7 +140,7 @@ class P2PStore:
     def __init__(self, device_manager: DeviceManager):
         from mooncake.engine import TransferEngine
 
-        self.rank = int(os.getenv("RANK"))
+        self.rank = int(os.environ["RANK"])  # ENV RANK is required
         gpu_count = device_manager.device_module.device_count()
         local_rank = self.rank % gpu_count
         device_type = device_manager.device_type
