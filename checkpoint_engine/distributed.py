@@ -3,6 +3,7 @@ import io
 import logging
 import os
 import pickle
+from datetime import timedelta
 from enum import Enum
 from typing import Any, List, Optional
 
@@ -79,7 +80,7 @@ class DistributedNccl:
         port: int,
         rank: int,
         world_size: int,
-        timeout: int = 300,
+        timeout: timedelta = timedelta(seconds=300),
         **kwargs,
     ):
         self._host = host
@@ -88,7 +89,9 @@ class DistributedNccl:
         self._world_size = world_size
         self._device = torch.device("cuda", rank)
 
-        self.pg = StatelessProcessGroup.create(host, port, rank, world_size, store_timeout=timeout)
+        self.pg = StatelessProcessGroup.create(
+            host, port, rank, world_size, store_timeout=int(timeout.total_seconds())
+        )
 
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
@@ -186,6 +189,27 @@ try:
     )
     from vllm_ascend.utils import current_stream
 
+    class HcclCommConfig(ctypes.Structure):
+        _fields_ = [
+            ("size", ctypes.c_size_t),
+            ("magic_word", ctypes.c_uint32),
+            ("version", ctypes.c_uint32),
+            ("reserved", ctypes.c_uint64),
+            ("hccl_buffer_size", ctypes.c_uint32),
+            ("hccl_deterministic", ctypes.c_uint32),
+            ("hccl_comm_name", ctypes.c_char * 128),
+            ("hccl_udi", ctypes.c_char * 128),
+            ("hccl_op_expansion_mode", ctypes.c_uint32),
+            ("hccl_rdma_traffic_class", ctypes.c_uint32),
+            ("hccl_rdma_service_level", ctypes.c_uint32),
+            ("hcll_world_rank_id", ctypes.c_uint32),
+            ("hccl_job_id", ctypes.c_uint64),
+            ("comm_engine", ctypes.c_int32),
+            ("thread_num", ctypes.c_uint32),
+            ("notify_num_per_thread", ctypes.c_uint32),
+            ("acl_graph_zero_copy_enable", ctypes.c_uint8),
+        ]
+
     orig_exported_functions = HCCLLibrary.exported_functions
     extended_functions = [
         # HcclResult HcclAllGather(
@@ -217,7 +241,7 @@ try:
                 ctypes.POINTER(ctypes.c_uint32),
                 ctypes.c_uint64,
                 ctypes.c_uint32,
-                ctypes.POINTER(hcclUniqueId),
+                ctypes.POINTER(HcclCommConfig),
                 ctypes.POINTER(hcclComm_t),
             ],
         ),
@@ -227,27 +251,6 @@ try:
         self.HCCL_CHECK(
             self._funcs["HcclAllGather"](send_buf, recv_buf, count, data_type, comm, stream)
         )
-
-    class HcclCommConfig(ctypes.Structure):
-        _fields_ = [
-            ("size", ctypes.c_size_t),
-            ("magic_word", ctypes.c_uint32),
-            ("version", ctypes.c_uint32),
-            ("reserved", ctypes.c_uint64),
-            ("hccl_buffer_size", ctypes.c_uint32),
-            ("hccl_deterministic", ctypes.c_uint32),
-            ("hccl_comm_name", ctypes.c_char * 128),
-            ("hccl_udi", ctypes.c_char * 128),
-            ("hccl_op_expansion_mode", ctypes.c_uint32),
-            ("hccl_rdma_traffic_class", ctypes.c_uint32),
-            ("hccl_rdma_service_level", ctypes.c_uint32),
-            ("hcll_world_rank_id", ctypes.c_uint32),
-            ("hccl_job_id", ctypes.c_uint64),
-            ("comm_engine", ctypes.c_int32),
-            ("thread_num", ctypes.c_uint32),
-            ("notify_num_per_thread", ctypes.c_uint32),
-            ("acl_graph_zero_copy_enable", ctypes.c_uint8),
-        ]
 
     def hccl_create_subcomm_config(
         self, comm, ranks_size, c_rank_ids, subcomm_id, subcomm_rank, comm_config
@@ -274,55 +277,13 @@ try:
     class PyHcclCommunicatorEx(PyHcclCommunicator):
         def __init__(self, group, device):
             super().__init__(group, device)
-            self.subcomms = {}
             self.subcomm_id = 1
 
-        def destroy_comm(self):
-            self.hccl.hcclCommDestroy(self.comm)
-
-        def all_reduce(
-            self,
-            in_tensor: torch.Tensor,
-            op: ReduceOp = ReduceOp.SUM,
-            stream=None,
-        ) -> torch.Tensor:
-            if self.disabled:
-                return None
-            assert in_tensor.device == self.device, (
-                f"this hccl communicator is created to work on {self.device}, "
-                f"but the input tensor is on {in_tensor.device}"
-            )
-            out_tensor = torch.empty_like(in_tensor)
-            if stream is None:
-                stream = current_stream()
-            self.hccl.hcclAllReduce(
-                buffer_type(in_tensor.data_ptr()),
-                buffer_type(out_tensor.data_ptr()),
-                in_tensor.numel(),
-                hcclDataTypeEnum.from_torch(in_tensor.dtype),
-                hcclRedOpTypeEnum.from_torch(op),
-                self.comm,  # todo
-                aclrtStream_t(stream.npu_stream),
-            )
-            return out_tensor
-
-        def broadcast(self, tensor: torch.Tensor, src: int, stream=None):
-            if self.disabled:
-                return None
-            assert tensor.device == self.device, (
-                f"this hccl communicator is created to work on {self.device}, "
-                f"but the input tensor is on {tensor.device}"
-            )
-            if stream is None:
-                stream = current_stream()
-            self.hccl.hcclBroadcast(
-                buffer_type(tensor.data_ptr()),
-                tensor.numel(),
-                hcclDataTypeEnum.from_torch(tensor.dtype),
-                src,
-                self.comm,  # todo
-                aclrtStream_t(stream.npu_stream),
-            )
+        def destroy_comm(self, comm=None):
+            if comm:
+                self.hccl.hcclCommDestroy(comm)
+            else:
+                self.hccl.hcclCommDestroy(self.comm)
 
         def all_gather(self, out_tensor: torch.Tensor, in_tensor: torch.Tensor, stream=None):
             if self.disabled:
@@ -343,10 +304,7 @@ try:
             )
             return out_tensor
 
-        def create_subcomm(
-            self,
-            ranks,
-        ):
+        def create_subcomm(self, ranks):
             comm_config = HcclCommConfig(
                 size=312,
                 magic_word=0xF0F0F0F0,
@@ -375,7 +333,6 @@ try:
             subcomm = self.hccl.hcclCreateSubCommConfig(
                 self.comm, ranks_size, c_rank_ids, subcomm_id, subcomm_rank, comm_config
             )
-            self.subcomms[subcomm_id] = subcomm
             self.subcomm_id += 1
             return subcomm
 
@@ -391,7 +348,7 @@ try:
             port: int,
             rank: int,
             world_size: int,
-            timeout: int = 300,
+            timeout: timedelta = timedelta(seconds=300),
             **kwargs,
         ):
             self._host = host
@@ -401,13 +358,15 @@ try:
             self._device = torch.device("npu", rank)
 
             self.pg = StatelessProcessGroup.create(
-                host, port, rank, world_size, store_timeout=timeout
+                host, port, rank, world_size, store_timeout=int(timeout.total_seconds())
             )
             self.pyhccl = PyHcclCommunicatorEx(group=self.pg, device=self._device)
+            self._comm = self.pyhccl.comm
 
         def destroy_process_group(self, group=None):
             if group in self.sub_groups:
-                group.pyhccl.destroy_comm()
+                subcomm = ctypes.c_void_p(group)
+                self.pyhccl.destroy_comm(subcomm)
                 del self.sub_groups[group]
                 return
 
@@ -422,69 +381,70 @@ try:
         def all_gather_object(self, object_list: list[Any], obj: Any, group=None):
             if group:
                 assert group in self.sub_groups, "invalid sub_group"
-                pyhccl = group.pyhccl
-            else:
-                pyhccl = self.pyhccl
-            _common_all_gather_object(pyhccl, self._device, self._world_size, object_list, obj)
+                subcomm = ctypes.c_void_p(group)
+                self.pyhccl.comm = subcomm
+
+            _common_all_gather_object(self.pyhccl, self._device, self._world_size, object_list, obj)
             current_stream().synchronize()
+
+            if group:
+                self.pyhccl.comm = self._comm
 
         def all_reduce(self, tensor: torch.Tensor, op=ReduceOp.SUM, group=None):
             if group:
                 assert group in self.sub_groups, "invalid sub_group"
-                pyhccl = group.pyhccl
-            else:
-                pyhccl = self.pyhccl
+                subcomm = ctypes.c_void_p(group)
+                self.pyhccl.comm = subcomm
 
-            out_tensor = pyhccl.all_reduce(tensor, op)
+            out_tensor = self.pyhccl.all_reduce(tensor, op)
             current_stream().synchronize()
             tensor.copy_(out_tensor)
+
+            if group:
+                self.pyhccl.comm = self._comm
 
         def broadcast(self, tensor: torch.Tensor, src=None, group=None):
             if group:
                 assert group in self.sub_groups, "invalid sub_group"
                 assert src in self.sub_groups[group], "src rank not in group"
-                pyhccl = group.pyhccl
-                # src is rank id in global world
+                subcomm = ctypes.c_void_p(group)
+                self.pyhccl.comm = subcomm
+                # convert src rank id in default world to subcomm
                 src = self.sub_groups[group].index(src)
-            else:
-                pyhccl = self.pyhccl
 
-            pyhccl.broadcast(tensor, src)
+            self.pyhccl.broadcast(tensor, src)
             current_stream().synchronize()
+
+            if group:
+                self.pyhccl.comm = self._comm
 
         def barrier(self, group=None):
             if group:
                 assert group in self.sub_groups, "invalid sub_group"
-                pyhccl = group.pyhccl
-            else:
-                pyhccl = self.pyhccl
+                subcomm = ctypes.c_void_p(group)
+                self.pyhccl.comm = subcomm
 
             data = torch.zeros(1, device=self._rank)
-            pyhccl.all_reduce(data)
+            self.pyhccl.all_reduce(data)
             current_stream().synchronize()
 
+            if group:
+                self.pyhccl.comm = self._comm
+
         def new_group(self, ranks):
-            # ranks is None or []
+            # if ranks is None or [], using the world instead
             if not ranks:
-                return self
+                ranks = list(range(self._world_size))
 
-            host = self._host
-            port = self._port
-            rank = self._rank
-
-            if rank not in ranks:
+            if self._rank not in ranks:
                 return
 
-            new_rank = ranks.index(rank)
-            new_world_size = len(ranks)
-
-            new_dist = DistributedHccl()
-            new_dist.init_process_group(
-                host, port + 10, new_rank, new_world_size
-            )  # todo host maybe incorrect
-            self.sub_groups[new_dist] = ranks
-
-            return new_dist
+            subcomm = self.pyhccl.create_subcomm(ranks)
+            value = 0
+            if subcomm:
+                value = subcomm.value
+                self.sub_groups[value] = ranks
+            return value
 
 except ImportError as e:
     pass

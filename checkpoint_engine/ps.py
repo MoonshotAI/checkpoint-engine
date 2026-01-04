@@ -197,9 +197,9 @@ class ParameterServer:
         self._remote_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._mem_fraction = mem_fraction or float(os.getenv("PS_MEM_FRACTION", "0.9"))
         if self.device_manager.backend == "nccl":
-            self.dist = DistributedNccl
+            self.dist = DistributedNccl()
         elif self.device_manager.backend == "hccl":
-            self.dist = DistributedHccl
+            self.dist = DistributedHccl()
         else:
             self.dist = torch.distributed
 
@@ -497,7 +497,7 @@ class ParameterServer:
         """
         master_addr = master_addr or os.getenv("MASTER_ADDR")
         assert master_addr, "master_addr is required"
-        store = self.dist.TCPStore(
+        store = dist.TCPStore(
             master_addr,
             _get_master_port(master_port),
             self._world_size,
@@ -840,7 +840,7 @@ class ParameterServer:
                             f"[rank{self._rank}] receive error response from rank {receiver_rank} for bucket {gidx} in checkpoint {checkpoint_name}: {msg}"
                         )
                         ret_code.fill_(1)
-                    self.dist.all_reduce(ret_code, op=self.dist.ReduceOp.SUM, group=ranks_group)
+                    self.dist.all_reduce(ret_code, op=dist.ReduceOp.SUM, group=ranks_group)
                     self.device_manager.device_module.synchronize()
                     if ret_code.item() != 0:
                         # quit early if any rank failed
