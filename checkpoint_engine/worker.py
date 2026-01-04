@@ -1,6 +1,7 @@
 import gc
 import traceback
 from collections.abc import Callable
+from functools import cached_property
 from typing import TypedDict
 
 import torch
@@ -117,6 +118,21 @@ class VllmColocateWorkerExtension:
         `worker_extension_cls` argument when initializing the vLLM worker.
     """
 
+    @cached_property
+    def _device_uuid(self) -> str:
+        from vllm.platforms import current_platform
+
+        if current_platform.device_type == "cuda":
+            return current_platform.get_device_uuid(self.device.index)
+        elif current_platform.device_type == "npu":
+            return f"NPU-{npu_generate_uuid()}"
+        else:
+            raise ValueError(f"Unsupported device type: {current_platform.device_type}")
+
+    @cached_property
+    def _zmq_ctx(self) -> zmq.Context:
+        return zmq.Context()
+
     def update_weights_from_ipc(self, zmq_handles: dict[str, str]):
         """
         Update model weights from checkpoint-engine via IPC communication.
@@ -149,16 +165,6 @@ class VllmColocateWorkerExtension:
         if current_platform.device_type == "npu" and self.device is None:
             self.device = torch.device(f"npu:{self.local_rank}")
         assert self.device is not None
-        if not hasattr(self, "_zmq_ctx") or self._zmq_ctx is None:
-            self._zmq_ctx = zmq.Context()
-
-        if not hasattr(self, "_device_uuid") or self._device_uuid is None:
-            if current_platform.device_type == "cuda":
-                self._device_uuid = current_platform.get_device_uuid(self.device.index)
-            elif current_platform.device_type == "npu":
-                self._device_uuid = f"NPU-{npu_generate_uuid()}"
-            else:
-                raise ValueError(f"Unsupported device type: {current_platform.device_type}")
 
         update_weights_from_ipc(
             self._zmq_ctx,
