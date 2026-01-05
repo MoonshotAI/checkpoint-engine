@@ -10,6 +10,14 @@ from typing import Any, List, Optional
 import torch
 import torch.distributed
 from torch.distributed import ReduceOp
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.distributed.device_communicators.pynccl_wrapper import (
+    Function,
+    NCCLLibrary,
+    buffer_type,
+    ncclComm_t,
+    ncclResult_t,
+)
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils import current_stream
 
@@ -68,6 +76,83 @@ def _common_all_gather_object(comm, device, world_size, object_list, object):
         object_list[i] = _tensor_to_object(tensor, tensor_size)
 
 
+class ncclConfig_t(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_size_t),
+        ("magic", ctypes.c_uint),
+        ("version", ctypes.c_uint),
+        ("blocking", ctypes.c_int),
+        ("cgaClusterSize", ctypes.c_int),
+        ("minCTAs", ctypes.c_int),
+        ("maxCTAs", ctypes.c_int),
+        ("netName", ctypes.c_char_p),
+        ("splitShare", ctypes.c_int),
+        ("trafficClass", ctypes.c_int),
+        ("commName", ctypes.c_char_p),
+        ("collnetEnable", ctypes.c_int),
+        ("CTAPolicy", ctypes.c_int),
+        ("shrinkShare", ctypes.c_int),
+        ("nvlsCTAs", ctypes.c_int),
+        ("nChannelsPerNetPeer", ctypes.c_int),
+        ("nvlinkCentricSched", ctypes.c_int),
+        ("graphUsageMode", ctypes.c_int),
+        ("numRmdCtx", ctypes.c_int),
+    ]
+
+nccl_orig_exported_functions = NCCLLibrary.exported_functions
+nccl_extended_functions = [
+    # ncclResult_t ncclCommSplit(
+    #   ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t *config
+    # )
+    Function(
+        "ncclCommSplit",
+        ncclResult_t,
+        [
+            ncclComm_t,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ncclComm_t),
+            ctypes.POINTER(ncclConfig_t),
+        ],
+    ),
+]
+
+
+def nccl_comm_split(
+    self,
+    comm: ncclComm_t,
+    color: int,
+    key: int,
+) -> ncclComm_t:
+    newcomm = ncclComm_t()
+
+    self.NCCL_CHECK(
+        self._funcs["ncclCommSplit"](comm, color, key, ctypes.byref(newcomm), None)
+    )
+    return newcomm
+
+
+# extend NCCLLibrary
+NCCLLibrary.exported_functions = nccl_orig_exported_functions + nccl_extended_functions
+NCCLLibrary.ncclCommSplit = nccl_comm_split
+
+
+class PyNcclCommunicatorEx(PyNcclCommunicator):
+    def destroy_comm(self, comm=None):
+        if comm:
+            self.nccl.ncclCommDestroy(comm)
+        else:
+            self.nccl.ncclCommDestroy(self.comm)
+
+    def create_newcomm(self, ranks):
+        if self.rank in ranks:
+            color = 0
+        else:
+            color = -1 # NCCL_SPLIT_NOCOLOR
+        newcomm = self.nccl.ncclCommSplit(self.comm, color, self.rank)
+        return newcomm
+
+
 class DistributedNccl:
     def __init__(self):
         self.pg = None
@@ -93,15 +178,20 @@ class DistributedNccl:
             host, port, rank, world_size, store_timeout=int(timeout.total_seconds())
         )
 
-        from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-
-        self.pynccl = PyNcclCommunicator(group=self.pg, device=self._device)
+        self.pynccl = PyNcclCommunicatorEx(group=self.pg, device=self._device)
+        self._comm = self.pynccl.comm
 
     def destroy_process_group(self, group=None):
-        # PyNcclCommunicator does not provide destroy method
         if group in self.sub_groups:
+            newcomm = ctypes.c_void_p(group)
+            self.pynccl.destroy_comm(newcomm)
             del self.sub_groups[group]
             return
+
+        self.pynccl.destroy_comm()
+
+        self.pynccl = None
+        self.pg = None
 
     def is_initialized(self) -> bool:
         return self.pynccl is not None
@@ -109,67 +199,67 @@ class DistributedNccl:
     def all_gather_object(self, object_list: list[Any], obj: Any, group=None):
         if group:
             assert group in self.sub_groups, "invalid sub_group"
-            pynccl = group.pynccl
-        else:
-            pynccl = self.pynccl
+            newcomm = ctypes.c_void_p(group)
+            self.pynccl.comm = newcomm
 
-        _common_all_gather_object(pynccl, self._device, self._world_size, object_list, object)
+        _common_all_gather_object(self.pynccl, self._device, self._world_size, object_list, obj)
         current_stream().synchronize()
+
+        if group:
+            self.pynccl.comm = self._comm
 
     def all_reduce(self, tensor: torch.Tensor, op=ReduceOp.SUM, group=None):
         if group:
             assert group in self.sub_groups, "invalid sub_group"
-            pynccl = group.pynccl
-        else:
-            pynccl = self.pynccl
+            newcomm = ctypes.c_void_p(group)
+            self.pynccl.comm = newcomm
 
-        out_tensor = pynccl.all_reduce(in_tensor=tensor, op=op)
+        out_tensor = self.pynccl.all_reduce(in_tensor=tensor, op=op)
         current_stream().synchronize()
         tensor.copy_(out_tensor)
+
+        if group:
+            self.pynccl.comm = self._comm
 
     def broadcast(self, tensor: torch.Tensor, src=None, group=None):
         if group:
             assert group in self.sub_groups, "invalid sub_group"
-            pynccl = group.pynccl
-        else:
-            pynccl = self.pynccl
+            assert src in self.sub_groups[group], "src rank not in group"
+            newcomm = ctypes.c_void_p(group)
+            self.pynccl.comm = newcomm
+            # convert src rank id in default world to newcomm
+            #src = self.sub_groups[group].index(src)
 
-        pynccl.broadcast(tensor, src)
+        self.pynccl.broadcast(tensor, src)
         current_stream().synchronize()
+
+        if group:
+            self.pynccl.comm = self._comm
 
     def barrier(self, group=None):
         if group:
             assert group in self.sub_groups, "invalid sub_group"
-            pynccl = group.pynccl
-        else:
-            pynccl = self.pynccl
+            newcomm = ctypes.c_void_p(group)
+            self.pynccl.comm = newcomm
 
         data = torch.zeros(1, device=self._rank)
-        pynccl.all_reduce(data)
+        self.pynccl.all_reduce(data)
         current_stream().synchronize()
+
+        if group:
+            self.pynccl.comm = self._comm
 
     def new_group(self, ranks):
         # ranks is None or []
         if not ranks:
-            return self
+            ranks = list(range(self._world_size))
 
-        host = self._host
-        port = self._port
-        rank = self._rank
-
-        if rank not in ranks:
-            return
-
-        new_rank = ranks.index(rank)
-        new_world_size = len(ranks)
-
-        new_dist = DistributedNccl()
-        new_dist.init_process_group(
-            host, port + 10, new_rank, new_world_size
-        )  # todo host maybe incorrect
-        self.sub_groups.append(new_dist)
-
-        return new_dist
+        newcomm = self.pynccl.create_newcomm(ranks)
+        value = 0
+        if newcomm:
+            value = newcomm.value
+            self.sub_groups[value] = ranks
+        return value
 
 
 try:
