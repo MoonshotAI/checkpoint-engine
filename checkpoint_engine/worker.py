@@ -168,7 +168,7 @@ class VllmColocateWorkerExtension:
 
         update_weights_from_ipc(
             self._zmq_ctx,
-            zmq_handles[device_uuid],
+            zmq_handles[self._device_uuid],
             device_id=self.device.index,
             run=self.model_runner.model.load_weights,
             post_hook=lambda: process_weights_after_loading(
