@@ -75,7 +75,6 @@ def _common_all_gather_object(comm, device, world_size, object_list, object):
         tensor_size = object_size_list[i]
         object_list[i] = _tensor_to_object(tensor, tensor_size)
 
-
 class ncclConfig_t(ctypes.Structure):
     _fields_ = [
         ("size", ctypes.c_size_t),
@@ -96,7 +95,7 @@ class ncclConfig_t(ctypes.Structure):
         ("nChannelsPerNetPeer", ctypes.c_int),
         ("nvlinkCentricSched", ctypes.c_int),
         ("graphUsageMode", ctypes.c_int),
-        ("numRmdCtx", ctypes.c_int),
+        ("numRmaCtx", ctypes.c_int),
     ]
 
 nccl_orig_exported_functions = NCCLLibrary.exported_functions
@@ -228,13 +227,15 @@ class DistributedNccl:
             newcomm = ctypes.c_void_p(group)
             self.pynccl.comm = newcomm
             # convert src rank id in default world to newcomm
-            #src = self.sub_groups[group].index(src)
+            src = self.sub_groups[group].index(src)
+            self.pynccl.rank = self.sub_groups[group].index(self._rank)
 
         self.pynccl.broadcast(tensor, src)
         current_stream().synchronize()
 
         if group:
             self.pynccl.comm = self._comm
+            self.pynccl.rank = self._rank
 
     def barrier(self, group=None):
         if group:
