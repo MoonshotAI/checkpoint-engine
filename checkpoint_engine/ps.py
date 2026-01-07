@@ -731,6 +731,7 @@ class ParameterServer:
         assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"
         assert dist.is_initialized(), "process group is not initialized"
 
+        p2p_update = False
         # if both ranks is None or [], it will use fully broadcast to update to all ranks
         if not ranks:
             logger.info(f"[rank{self._rank}] update checkpoint {checkpoint_name}")
@@ -739,6 +740,7 @@ class ParameterServer:
             assert self._p2p_store is not None, "p2p store is not initialized"
             assert ranks, "ranks should be set"
 
+            p2p_update = True
             need_update = self._rank in ranks
             logger.info(
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} p2p, {need_update=} with {ranks=}, "
@@ -764,11 +766,6 @@ class ParameterServer:
             if disable_h2d_buffer
             else torch.empty(bucket_size, dtype=torch.uint8, device=self.device_manager.device_type)
         )
-        # p2p store need to register h2d_buffer to let other ranks read
-        if ranks:
-            h2d_buffer_name = "__h2d_buffer__"
-            if h2d_buffer is not None and self._p2p_store is not None:
-                self._p2p_store.register_named_tensors({h2d_buffer_name: h2d_buffer})
         receiver_rank_buckets: list[tuple[int, H2DBucket]] = []
         for receiver_rank, owner_rank, bucket in buckets:
             if receiver_rank != self._rank:
@@ -778,6 +775,10 @@ class ParameterServer:
         buffer = torch.empty(
             bucket_size * 2, dtype=torch.uint8, device=self.device_manager.device_type
         )
+        if p2p_update:
+            # p2p store need to register buffer to let other ranks read
+            p2p_ipc_buffer_name = "__ipc_buffer__"
+            self._p2p_store.register_named_tensors({p2p_ipc_buffer_name: buffer if disable_h2d_buffer else h2d_buffer})
         handle = reduce_tensor(buffer)
 
         buckets_by_receiver_rank: dict[int, list[H2DBucket]] = defaultdict(list)
@@ -823,7 +824,9 @@ class ParameterServer:
                     buffer_b: torch.Tensor = buffer[start : start + bucket.size]
                     if receiver_rank == self._rank:
                         if disable_h2d_buffer:
-                            self._copy_to_buffer(checkpoint_name, bucket, buffer_b)
+                            if p2p_update:
+                                assert bucket == receiver_rank_buckets[i][1]
+                            self._copy_to_buffer(checkpoint_name, bucket, buffer_b, receiver_rank_buckets[i][0] if p2p_update else None)
                         else:
                             buffer_b.data.copy_(h2d_buffer[: bucket.size])
                     dist.broadcast(buffer_b, src=receiver_rank, group=ranks_group)
@@ -850,8 +853,8 @@ class ParameterServer:
             req_thread.join()
             dist.barrier(group=ranks_group)
             socket.close()
-            if ranks and h2d_buffer is not None:
-                self._p2p_store.unregister_named_tensors([h2d_buffer_name])
+            if p2p_update:
+                self._p2p_store.unregister_named_tensors([p2p_ipc_buffer_name])
 
             self.device_manager.device_module.empty_cache()
 
