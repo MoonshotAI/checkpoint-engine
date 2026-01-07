@@ -159,11 +159,18 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-name", type=str, default="my-checkpoint-iter-0")
     parser.add_argument("--update-method", type=str, default="broadcast")
     parser.add_argument("--uds", type=str, default=None)
+    parser.add_argument("--device_type", type=str, default=None)
     args = parser.parse_args()
     rank = int(os.getenv("RANK"))
     world_size = int(os.getenv("WORLD_SIZE"))
+
+    if args.device_type == "npu":
+        import checkpoint_engine.distributed_hccl as dist
+    elif args.device_type == "cuda":
+        import checkpoint_engine.distributed_nccl as dist
+
     req_func = req_inference(args.endpoint, args.inference_parallel_size, args.uds)
-    ps = ParameterServer(auto_pg=True)
+    ps = ParameterServer(auto_pg=True, device_type=args.device_type)
     if args.load_metas_file:
         join(
             ps,

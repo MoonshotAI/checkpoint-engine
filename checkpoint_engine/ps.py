@@ -24,7 +24,6 @@ from checkpoint_engine.data_types import (
 from checkpoint_engine.device_utils import DeviceManager, get_ip, npu_generate_uuid
 from checkpoint_engine.p2p_store import P2PStore
 from checkpoint_engine.pin_memory import _ALIGN_SIZE, _register_checkpoint
-from checkpoint_engine.distributed import DistributedNccl, DistributedHccl
 
 
 if TYPE_CHECKING:
@@ -176,6 +175,7 @@ class ParameterServer:
         auto_pg: bool = True,
         gpu_count: int | None = None,
         mem_fraction: float | None = None,
+        device_type: str | None = None,
     ):
         """
         Initialize the parameter server. env RANK, WORLD_SIZE and MASTER_ADDR must be set.
@@ -196,12 +196,16 @@ class ParameterServer:
         self._local_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._remote_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._mem_fraction = mem_fraction or float(os.getenv("PS_MEM_FRACTION", "0.9"))
-        if self.device_manager.backend == "nccl":
-            self.dist = DistributedNccl()
-        elif self.device_manager.backend == "hccl":
-            self.dist = DistributedHccl()
+        if device_type == "npu" and self.device_manager.device_type == "npu":
+            import checkpoint_engine.distributed_hccl
+            dist = checkpoint_engine.distributed_hccl
+            self._device_type = "npu"
+        elif device_type == "cuda" and self.device_manager.device_type == "cuda":
+            import checkpoint_engine.distributed_nccl
+            dist = checkpoint_engine.distributed_nccl
+            self._device_type = "cuda"
         else:
-            self.dist = torch.distributed
+            self._device_type = "torch"
 
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
@@ -422,9 +426,9 @@ class ParameterServer:
         This function should be called before update and init a new value to `self._current_global_parameter_metas`,
         which can be exported by using `self.get_metas` function.
         """
-        if self._auto_pg and not self.dist.is_initialized():
+        if self._auto_pg and not dist.is_initialized():
             self.init_process_group()
-        assert self.dist.is_initialized(), "process group is not initialized"
+        assert dist.is_initialized(), "process group is not initialized"
         metas_lst: list[DataToGather | None] = [None for _ in range(self._world_size)]  # type: ignore
         try:
             memory_pool = self._get_memory_pool(checkpoint_name)
@@ -445,7 +449,7 @@ class ParameterServer:
             rdma_device=self._rdma_device or "",
         )
 
-        self.dist.all_gather_object(metas_lst, metas)
+        dist.all_gather_object(metas_lst, metas)
 
         self._current_global_parameter_metas = {}
 
@@ -497,20 +501,29 @@ class ParameterServer:
         """
         master_addr = master_addr or os.getenv("MASTER_ADDR")
         assert master_addr, "master_addr is required"
-        store = dist.TCPStore(
-            master_addr,
-            _get_master_port(master_port),
-            self._world_size,
-            timeout=timeout,
-            is_master=self._rank == 0,
-        )
-        self.dist.init_process_group(
-            backend=self.device_manager.backend,
-            world_size=self._world_size,
-            rank=self._rank,
-            timeout=timeout,
-            store=store,
-        )
+        if self._device_type == "torch":
+            store = torch.distributed.TCPStore(
+                master_addr,
+                _get_master_port(master_port),
+                self._world_size,
+                timeout=timeout,
+                is_master=self._rank == 0,
+            )
+            torch.distributed.init_process_group(
+                backend=self.device_manager.backend,
+                world_size=self._world_size,
+                rank=self._rank,
+                timeout=timeout,
+                store=store,
+            )
+        else:
+            dist.init_process_group(
+                host=master_addr,
+                port=_get_master_port(master_port),
+                rank=self._rank,
+                world_size=self._world_size,
+                timeout=timeout,
+            )
         logger.info(f"[rank{self._rank}] init process group successfully.")
 
     def store_based_barrier(
@@ -526,7 +539,7 @@ class ParameterServer:
         Args:
             store: The TCPStore instance to use for synchronization.
         """
-        dist.distributed_c10d._store_based_barrier(
+        torch.distributed.distributed_c10d._store_based_barrier(
             rank=self._rank,
             store=store,
             group_name="parameter_server_barrier",
@@ -566,14 +579,14 @@ class ParameterServer:
             master_addr = os.getenv("MASTER_ADDR") or master_addr
             assert master_addr, "master_addr is required"
             if self._auto_pg:
-                if not self.dist.is_initialized():
+                if not dist.is_initialized():
                     self.init_process_group(
                         timeout=timeout, master_addr=master_addr, master_port=master_port
                     )
             # if ranks is None or [], it will use fully broadcast to update to all ranks
-            ranks_group = self.dist.new_group(ranks) if ranks else None
+            ranks_group = dist.new_group(ranks) if ranks else None
             self._update_per_bucket(checkpoint_name, req_func, ranks_group, ranks)
-            self.dist.barrier()
+            dist.barrier()
         except Exception as e:
             logger.exception(
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} error {e}"
@@ -581,9 +594,9 @@ class ParameterServer:
             raise
         finally:
             if ranks_group:
-                self.dist.destroy_process_group(ranks_group)
-            if self._auto_pg and self.dist.is_initialized():
-                self.dist.destroy_process_group()
+                dist.destroy_process_group(ranks_group)
+            if self._auto_pg and dist.is_initialized():
+                dist.destroy_process_group()
             self.device_manager.device_module.empty_cache()
             logger.info(
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} done. "
@@ -619,7 +632,7 @@ class ParameterServer:
             dtype=torch.int64,
             device=self.device_manager.device_type,
         )
-        self.dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=ranks_group)
+        dist.all_reduce(tensor, op=torch.distributed.ReduceOp.MIN, group=ranks_group)
         tensor = tensor.cpu()
         free_bytes, self._zmq_addr_counter = tensor[0].item(), -tensor[1].item()
         max_tensor_bytes = 0
@@ -725,7 +738,7 @@ class ParameterServer:
         ranks: list[int] | None = None,
     ):
         assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"
-        assert self.dist.is_initialized(), "process group is not initialized"
+        assert dist.is_initialized(), "process group is not initialized"
 
         p2p_update = False
         # if both ranks is None or [], it will use fully broadcast to update to all ranks
@@ -746,7 +759,7 @@ class ParameterServer:
             if not need_update:
                 return
             # first execute a barrier to avoid subsequent device oom
-            self.dist.barrier(group=ranks_group)
+            dist.barrier(group=ranks_group)
 
         bucket_size, disable_h2d_buffer = self._detect_bucket_size(ranks_group)
         buckets = _gen_h2d_buckets(
@@ -832,7 +845,7 @@ class ParameterServer:
                             )
                         else:
                             buffer_b.data.copy_(h2d_buffer[: bucket.size])
-                    self.dist.broadcast(buffer_b, src=receiver_rank, group=ranks_group)
+                    dist.broadcast(buffer_b, src=receiver_rank, group=ranks_group)
                     resp = socket.recv()
                     if resp != b"":
                         msg = resp.decode("utf-8")
@@ -840,7 +853,7 @@ class ParameterServer:
                             f"[rank{self._rank}] receive error response from rank {receiver_rank} for bucket {gidx} in checkpoint {checkpoint_name}: {msg}"
                         )
                         ret_code.fill_(1)
-                    self.dist.all_reduce(ret_code, op=dist.ReduceOp.SUM, group=ranks_group)
+                    dist.all_reduce(ret_code, op=torch.distributed.ReduceOp.SUM, group=ranks_group)
                     self.device_manager.device_module.synchronize()
                     if ret_code.item() != 0:
                         # quit early if any rank failed
@@ -854,7 +867,7 @@ class ParameterServer:
             socket.recv()
         finally:
             req_thread.join()
-            self.dist.barrier(group=ranks_group)
+            dist.barrier(group=ranks_group)
             socket.close()
             if p2p_update:
                 self._p2p_store.unregister_named_tensors([p2p_ipc_buffer_name])
