@@ -204,7 +204,7 @@ def destroy_process_group(group=None):
     dist.pg = None
     dist.initialized = False
 
-def is_initialized(dist) -> bool:
+def is_initialized() -> bool:
     return dist.initialized
 
 def all_gather_object(object_list: list[Any], obj: Any, group=None):
