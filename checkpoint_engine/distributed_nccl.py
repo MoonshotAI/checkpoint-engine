@@ -71,6 +71,7 @@ def _common_all_gather_object(comm, device, world_size, object_list, object):
         tensor_size = object_size_list[i]
         object_list[i] = _tensor_to_object(tensor, tensor_size)
 
+
 class ncclConfig_t(ctypes.Structure):
     _fields_ = [
         ("size", ctypes.c_size_t),
@@ -93,6 +94,7 @@ class ncclConfig_t(ctypes.Structure):
         ("graphUsageMode", ctypes.c_int),
         ("numRmaCtx", ctypes.c_int),
     ]
+
 
 nccl_orig_exported_functions = NCCLLibrary.exported_functions
 nccl_extended_functions = [
@@ -121,9 +123,7 @@ def nccl_comm_split(
 ) -> ncclComm_t:
     newcomm = ncclComm_t()
 
-    self.NCCL_CHECK(
-        self._funcs["ncclCommSplit"](comm, color, key, ctypes.byref(newcomm), None)
-    )
+    self.NCCL_CHECK(self._funcs["ncclCommSplit"](comm, color, key, ctypes.byref(newcomm), None))
     return newcomm
 
 
@@ -143,7 +143,7 @@ class PyNcclCommunicatorEx(PyNcclCommunicator):
         if self.rank in ranks:
             color = 0
         else:
-            color = -1 # NCCL_SPLIT_NOCOLOR
+            color = -1  # NCCL_SPLIT_NOCOLOR
         newcomm = self.nccl.ncclCommSplit(self.comm, color, self.rank)
         return newcomm
 
@@ -151,7 +151,7 @@ class PyNcclCommunicatorEx(PyNcclCommunicator):
 class DistributedNccl:
     pg: StatelessProcessGroup
     pynccl: PyNcclCommunicatorEx
-    sub_groups: dict[int, list[int]]
+    sub_groups: dict[int, list[int]] = {}
     comm: ncclComm_t
 
     host: str
@@ -164,6 +164,7 @@ class DistributedNccl:
 
 
 dist = DistributedNccl()
+
 
 def init_process_group(
     host: str,
@@ -189,6 +190,7 @@ def init_process_group(
     dist.comm = dist.pynccl.comm
     dist.initialized = True
 
+
 def destroy_process_group(group=None):
     assert dist.initialized, "not initialized"
 
@@ -204,8 +206,10 @@ def destroy_process_group(group=None):
     dist.pg = None
     dist.initialized = False
 
+
 def is_initialized() -> bool:
     return dist.initialized
+
 
 def all_gather_object(object_list: list[Any], obj: Any, group=None):
     assert dist.initialized, "not initialized"
@@ -221,6 +225,7 @@ def all_gather_object(object_list: list[Any], obj: Any, group=None):
     if group:
         dist.pynccl.comm = dist.comm
 
+
 def all_reduce(tensor: torch.Tensor, op=ReduceOp.SUM, group=None):
     assert dist.initialized, "not initialized"
 
@@ -235,6 +240,7 @@ def all_reduce(tensor: torch.Tensor, op=ReduceOp.SUM, group=None):
 
     if group:
         dist.pynccl.comm = dist.comm
+
 
 def broadcast(tensor: torch.Tensor, src=None, group=None):
     assert dist.initialized, "not initialized"
@@ -255,6 +261,7 @@ def broadcast(tensor: torch.Tensor, src=None, group=None):
         dist.pynccl.comm = dist.comm
         dist.pynccl.rank = dist.rank
 
+
 def barrier(group=None):
     assert dist.initialized, "not initialized"
 
@@ -269,6 +276,7 @@ def barrier(group=None):
 
     if group:
         dist.pynccl.comm = dist.comm
+
 
 def new_group(ranks):
     assert dist.initialized, "not initialized"

@@ -4,7 +4,6 @@ from typing import Any, List, Optional
 
 import torch
 from torch.distributed import ReduceOp
-
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
 from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
@@ -23,6 +22,7 @@ from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
 from vllm_ascend.utils import current_stream
 
 from .distributed_nccl import _common_all_gather_object
+
 
 class HcclCommConfig(ctypes.Structure):
     _fields_ = [
@@ -44,6 +44,7 @@ class HcclCommConfig(ctypes.Structure):
         ("notify_num_per_thread", ctypes.c_uint32),
         ("acl_graph_zero_copy_enable", ctypes.c_uint8),
     ]
+
 
 orig_exported_functions = HCCLLibrary.exported_functions
 extended_functions = [
@@ -82,10 +83,12 @@ extended_functions = [
     ),
 ]
 
+
 def hccl_all_gather(self, send_buf, recv_buf, count, data_type, comm, stream):
     self.HCCL_CHECK(
         self._funcs["HcclAllGather"](send_buf, recv_buf, count, data_type, comm, stream)
     )
+
 
 def hccl_create_subcomm_config(
     self, comm, ranks_size, c_rank_ids, subcomm_id, subcomm_rank, comm_config
@@ -104,10 +107,12 @@ def hccl_create_subcomm_config(
     )
     return subcomm
 
+
 # extend HCCLLibrary
 HCCLLibrary.exported_functions = orig_exported_functions + extended_functions
 HCCLLibrary.hcclAllGather = hccl_all_gather
 HCCLLibrary.hcclCreateSubCommConfig = hccl_create_subcomm_config
+
 
 class PyHcclCommunicatorEx(PyHcclCommunicator):
     def __init__(self, group, device):
@@ -171,10 +176,11 @@ class PyHcclCommunicatorEx(PyHcclCommunicator):
         self.subcomm_id += 1
         return subcomm
 
+
 class DistributedHccl:
     pg: StatelessProcessGroup
     pyhccl: PyHcclCommunicatorEx
-    sub_groups: dict[int, list[int]]
+    sub_groups: dict[int, list[int]] = {}
     comm: hcclComm_t
 
     host: str
@@ -187,6 +193,7 @@ class DistributedHccl:
 
 
 dist = DistributedHccl()
+
 
 def init_process_group(
     host: str,
@@ -211,6 +218,7 @@ def init_process_group(
     dist.comm = dist.pyhccl.comm
     dist.initialized = True
 
+
 def destroy_process_group(group=None):
     assert dist.initialized, "not initialized"
 
@@ -226,8 +234,10 @@ def destroy_process_group(group=None):
     dist.pg = None
     dist.initialized = False
 
+
 def is_initialized() -> bool:
     return dist.initialized
+
 
 def all_gather_object(object_list: list[Any], obj: Any, group=None):
     assert dist.initialized, "not initialized"
@@ -243,6 +253,7 @@ def all_gather_object(object_list: list[Any], obj: Any, group=None):
     if group:
         dist.pyhccl.comm = dist.comm
 
+
 def all_reduce(tensor: torch.Tensor, op=ReduceOp.SUM, group=None):
     assert dist.initialized, "not initialized"
 
@@ -257,6 +268,7 @@ def all_reduce(tensor: torch.Tensor, op=ReduceOp.SUM, group=None):
 
     if group:
         dist.pyhccl.comm = dist.comm
+
 
 def broadcast(tensor: torch.Tensor, src=None, group=None):
     assert dist.initialized, "not initialized"
@@ -277,6 +289,7 @@ def broadcast(tensor: torch.Tensor, src=None, group=None):
         dist.pyhccl.comm = dist.comm
         dist.pyhccl.rank = dist.rank
 
+
 def barrier(group=None):
     assert dist.initialized, "not initialized"
 
@@ -291,6 +304,7 @@ def barrier(group=None):
 
     if group:
         dist.pyhccl.comm = dist.comm
+
 
 def new_group(ranks):
     assert dist.initialized, "not initialized"
