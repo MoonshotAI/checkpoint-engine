@@ -1,14 +1,10 @@
 import ctypes
 import io
-import logging
-import os
 import pickle
 from datetime import timedelta
-from enum import Enum
 from typing import Any, List, Optional
 
 import torch
-import torch.distributed
 from torch.distributed import ReduceOp
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import (
@@ -153,111 +149,137 @@ class PyNcclCommunicatorEx(PyNcclCommunicator):
 
 
 class DistributedNccl:
-    def __init__(self):
-        self.pg = None
-        self.pynccl = None
-        self.sub_groups = {}
+    pg: StatelessProcessGroup
+    pynccl: PyNcclCommunicatorEx
+    sub_groups: dict[int, list[int]]
+    comm: ncclComm_t
 
-    def init_process_group(
-        self,
-        host: str,
-        port: int,
-        rank: int,
-        world_size: int,
-        timeout: timedelta = timedelta(seconds=300),
-        **kwargs,
-    ):
-        self._host = host
-        self._port = port
-        self._rank = rank
-        self._world_size = world_size
-        self._device = torch.device("cuda", rank)
+    host: str
+    port: int
+    rank: int
+    world_size: int
+    device: torch.device
 
-        self.pg = StatelessProcessGroup.create(
-            host, port, rank, world_size, store_timeout=int(timeout.total_seconds())
-        )
+    initialized: bool = False
 
-        self.pynccl = PyNcclCommunicatorEx(group=self.pg, device=self._device)
-        self._comm = self.pynccl.comm
 
-    def destroy_process_group(self, group=None):
-        if group in self.sub_groups:
-            newcomm = ctypes.c_void_p(group)
-            self.pynccl.destroy_comm(newcomm)
-            del self.sub_groups[group]
-            return
+dist = DistributedNccl()
 
-        self.pynccl.destroy_comm()
+def init_process_group(
+    host: str,
+    port: int,
+    rank: int,
+    world_size: int,
+    timeout: timedelta = timedelta(seconds=300),
+    **kwargs,
+):
+    assert not dist.initialized, "already initialized"
 
-        self.pynccl = None
-        self.pg = None
+    dist.host = host
+    dist.port = port
+    dist.rank = rank
+    dist.world_size = world_size
+    dist.device = torch.device("cuda", rank)
 
-    def is_initialized(self) -> bool:
-        return self.pynccl is not None
+    dist.pg = StatelessProcessGroup.create(
+        host, port, rank, world_size, store_timeout=int(timeout.total_seconds())
+    )
 
-    def all_gather_object(self, object_list: list[Any], obj: Any, group=None):
-        if group:
-            assert group in self.sub_groups, "invalid sub_group"
-            newcomm = ctypes.c_void_p(group)
-            self.pynccl.comm = newcomm
+    dist.pynccl = PyNcclCommunicatorEx(group=dist.pg, device=dist.device)
+    dist.comm = dist.pynccl.comm
+    dist.initialized = True
 
-        _common_all_gather_object(self.pynccl, self._device, self._world_size, object_list, obj)
-        current_stream().synchronize()
+def destroy_process_group(group=None):
+    assert dist.initialized, "not initialized"
 
-        if group:
-            self.pynccl.comm = self._comm
+    if group in dist.sub_groups:
+        newcomm = ctypes.c_void_p(group)
+        dist.pynccl.destroy_comm(newcomm)
+        del dist.sub_groups[group]
+        return
 
-    def all_reduce(self, tensor: torch.Tensor, op=ReduceOp.SUM, group=None):
-        if group:
-            assert group in self.sub_groups, "invalid sub_group"
-            newcomm = ctypes.c_void_p(group)
-            self.pynccl.comm = newcomm
+    dist.pynccl.destroy_comm()
 
-        out_tensor = self.pynccl.all_reduce(in_tensor=tensor, op=op)
-        current_stream().synchronize()
-        tensor.copy_(out_tensor)
+    dist.pynccl = None
+    dist.pg = None
+    dist.initialized = False
 
-        if group:
-            self.pynccl.comm = self._comm
+def is_initialized(dist) -> bool:
+    return dist.initialized
 
-    def broadcast(self, tensor: torch.Tensor, src=None, group=None):
-        if group:
-            assert group in self.sub_groups, "invalid sub_group"
-            assert src in self.sub_groups[group], "src rank not in group"
-            newcomm = ctypes.c_void_p(group)
-            self.pynccl.comm = newcomm
-            # convert src rank id in default world to newcomm
-            src = self.sub_groups[group].index(src)
-            self.pynccl.rank = self.sub_groups[group].index(self._rank)
+def all_gather_object(object_list: list[Any], obj: Any, group=None):
+    assert dist.initialized, "not initialized"
 
-        self.pynccl.broadcast(tensor, src)
-        current_stream().synchronize()
+    if group:
+        assert group in dist.sub_groups, "invalid sub_group"
+        newcomm = ctypes.c_void_p(group)
+        dist.pynccl.comm = newcomm
 
-        if group:
-            self.pynccl.comm = self._comm
-            self.pynccl.rank = self._rank
+    _common_all_gather_object(dist.pynccl, dist.device, dist.world_size, object_list, obj)
+    current_stream().synchronize()
 
-    def barrier(self, group=None):
-        if group:
-            assert group in self.sub_groups, "invalid sub_group"
-            newcomm = ctypes.c_void_p(group)
-            self.pynccl.comm = newcomm
+    if group:
+        dist.pynccl.comm = dist.comm
 
-        data = torch.zeros(1, device=self._rank)
-        self.pynccl.all_reduce(data)
-        current_stream().synchronize()
+def all_reduce(tensor: torch.Tensor, op=ReduceOp.SUM, group=None):
+    assert dist.initialized, "not initialized"
 
-        if group:
-            self.pynccl.comm = self._comm
+    if group:
+        assert group in dist.sub_groups, "invalid sub_group"
+        newcomm = ctypes.c_void_p(group)
+        dist.pynccl.comm = newcomm
 
-    def new_group(self, ranks):
-        # ranks is None or []
-        if not ranks:
-            ranks = list(range(self._world_size))
+    out_tensor = dist.pynccl.all_reduce(in_tensor=tensor, op=op)
+    current_stream().synchronize()
+    tensor.copy_(out_tensor)
 
-        newcomm = self.pynccl.create_newcomm(ranks)
-        value = 0
-        if newcomm:
-            value = newcomm.value
-            self.sub_groups[value] = ranks
-        return value
+    if group:
+        dist.pynccl.comm = dist.comm
+
+def broadcast(tensor: torch.Tensor, src=None, group=None):
+    assert dist.initialized, "not initialized"
+
+    if group:
+        assert group in dist.sub_groups, "invalid sub_group"
+        assert src in dist.sub_groups[group], "src rank not in group"
+        newcomm = ctypes.c_void_p(group)
+        dist.pynccl.comm = newcomm
+        # convert src rank id in default world to newcomm
+        src = dist.sub_groups[group].index(src)
+        dist.pynccl.rank = dist.sub_groups[group].index(dist.rank)
+
+    dist.pynccl.broadcast(tensor, src)
+    current_stream().synchronize()
+
+    if group:
+        dist.pynccl.comm = dist.comm
+        dist.pynccl.rank = dist.rank
+
+def barrier(group=None):
+    assert dist.initialized, "not initialized"
+
+    if group:
+        assert group in dist.sub_groups, "invalid sub_group"
+        newcomm = ctypes.c_void_p(group)
+        dist.pynccl.comm = newcomm
+
+    data = torch.zeros(1, device=dist.rank)
+    dist.pynccl.all_reduce(data)
+    current_stream().synchronize()
+
+    if group:
+        dist.pynccl.comm = dist.comm
+
+def new_group(ranks):
+    assert dist.initialized, "not initialized"
+
+    # ranks is None or []
+    if not ranks:
+        ranks = list(range(dist.world_size))
+
+    newcomm = dist.pynccl.create_newcomm(ranks)
+    value = 0
+    if newcomm:
+        value = newcomm.value
+        dist.sub_groups[value] = ranks
+    return value
