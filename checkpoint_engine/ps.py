@@ -778,7 +778,9 @@ class ParameterServer:
         if p2p_update:
             # p2p store need to register buffer to let other ranks read
             p2p_ipc_buffer_name = "__ipc_buffer__"
-            self._p2p_store.register_named_tensors({p2p_ipc_buffer_name: buffer if disable_h2d_buffer else h2d_buffer})
+            self._p2p_store.register_named_tensors(
+                {p2p_ipc_buffer_name: buffer if disable_h2d_buffer else h2d_buffer}
+            )
         handle = reduce_tensor(buffer)
 
         buckets_by_receiver_rank: dict[int, list[H2DBucket]] = defaultdict(list)
@@ -826,7 +828,12 @@ class ParameterServer:
                         if disable_h2d_buffer:
                             if p2p_update:
                                 assert bucket == receiver_rank_buckets[i][1]
-                            self._copy_to_buffer(checkpoint_name, bucket, buffer_b, receiver_rank_buckets[i][0] if p2p_update else None)
+                            self._copy_to_buffer(
+                                checkpoint_name,
+                                bucket,
+                                buffer_b,
+                                receiver_rank_buckets[i][0] if p2p_update else None,
+                            )
                         else:
                             buffer_b.data.copy_(h2d_buffer[: bucket.size])
                     dist.broadcast(buffer_b, src=receiver_rank, group=ranks_group)
