@@ -196,13 +196,12 @@ class ParameterServer:
         self._local_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._remote_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._mem_fraction = mem_fraction or float(os.getenv("PS_MEM_FRACTION", "0.9"))
+        global dist
         if device_type == "npu" and self.device_manager.device_type == "npu":
-            import checkpoint_engine.distributed_hccl
-            dist = checkpoint_engine.distributed_hccl
+            import checkpoint_engine.distributed_hccl as dist
             self._device_type = "npu"
         elif device_type == "cuda" and self.device_manager.device_type == "cuda":
-            import checkpoint_engine.distributed_nccl
-            dist = checkpoint_engine.distributed_nccl
+            import checkpoint_engine.distributed_nccl as dist
             self._device_type = "cuda"
         else:
             self._device_type = "torch"
