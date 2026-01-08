@@ -298,7 +298,7 @@ def barrier(group=None):
         subcomm = ctypes.c_void_p(group)
         dist.pyhccl.comm = subcomm
 
-    data = torch.zeros(1, device=dist.rank)
+    data = torch.zeros(1, device=dist.device)
     dist.pyhccl.all_reduce(data)
     current_stream().synchronize()
 

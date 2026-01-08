@@ -270,7 +270,7 @@ def barrier(group=None):
         newcomm = ctypes.c_void_p(group)
         dist.pynccl.comm = newcomm
 
-    data = torch.zeros(1, device=dist.rank)
+    data = torch.zeros(1, device=dist.device)
     dist.pynccl.all_reduce(data)
     current_stream().synchronize()
 
