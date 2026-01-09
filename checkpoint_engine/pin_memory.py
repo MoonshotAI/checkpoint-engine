@@ -191,6 +191,8 @@ def _load_checkpoint(files: list[str]) -> dict[str, torch.Tensor]:
 
 
 def _inplace_pin_memory(files: list[str], rank: int | None = None) -> list[MemoryBuffer]:
+    device_index = torch.cuda.current_device()
+
     def _parse_and_pin_from_safetensors(file_path: str) -> MemoryBuffer:
         """
         safetensors format see https://huggingface.co/docs/safetensors/en/index#format.
@@ -204,6 +206,7 @@ def _inplace_pin_memory(files: list[str], rank: int | None = None) -> list[Memor
             Pin the memory of tensor in-place.
             See: https://github.com/pytorch/pytorch/issues/32167
             """
+            torch.cuda.set_device(device_index)
             cudart = torch.cuda.cudart()
             r = cudart.cudaHostRegister(t.data_ptr(), t.numel() * t.element_size(), 0)
             assert r == 0, f"pin memory error, error code: {r}"
