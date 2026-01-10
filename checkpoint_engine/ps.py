@@ -197,12 +197,9 @@ class ParameterServer:
         self._remote_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._mem_fraction = mem_fraction or float(os.getenv("PS_MEM_FRACTION", "0.9"))
         global dist
-        if device_type == "npu" and self.device_manager.device_type == "npu":
-            import checkpoint_engine.distributed_hccl as dist
-            self._device_type = "npu"
-        elif device_type == "cuda" and self.device_manager.device_type == "cuda":
-            import checkpoint_engine.distributed_nccl as dist
-            self._device_type = "cuda"
+        if device_type is not None:
+            import checkpoint_engine.distributed as dist
+            self._device_type = device_type
         else:
             self._device_type = "torch"
 
@@ -521,6 +518,7 @@ class ParameterServer:
                 port=_get_master_port(master_port),
                 rank=self._rank,
                 world_size=self._world_size,
+                device_type=self._device_type,
                 timeout=timeout,
             )
         logger.info(f"[rank{self._rank}] init process group successfully.")

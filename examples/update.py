@@ -164,10 +164,8 @@ if __name__ == "__main__":
     rank = int(os.getenv("RANK"))
     world_size = int(os.getenv("WORLD_SIZE"))
 
-    if args.device_type == "npu":
-        import checkpoint_engine.distributed_hccl as dist
-    elif args.device_type == "cuda":
-        import checkpoint_engine.distributed_nccl as dist
+    if args.device_type is not None:
+        import checkpoint_engine.distributed as dist
 
     req_func = req_inference(args.endpoint, args.inference_parallel_size, args.uds)
     ps = ParameterServer(auto_pg=True, device_type=args.device_type)

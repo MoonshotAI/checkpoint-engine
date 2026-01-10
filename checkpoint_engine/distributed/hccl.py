@@ -20,8 +20,7 @@ from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
     hcclUniqueId,
 )
 from vllm_ascend.utils import current_stream
-
-from .distributed_nccl import _common_all_gather_object
+from checkpoint_engine.distributed.base import Distributed, _common_all_gather_object
 
 
 class HcclCommConfig(ctypes.Structure):
@@ -177,148 +176,166 @@ class PyHcclCommunicatorEx(PyHcclCommunicator):
         return subcomm
 
 
-class DistributedHccl:
-    pg: StatelessProcessGroup
-    pyhccl: PyHcclCommunicatorEx
-    sub_groups: dict[int, list[int]] = {}
-    comm: hcclComm_t
+class DistributedHccl(Distributed):
+    def __init__(self):
+        self.pg: StatelessProcessGroup = None
+        self.pyhccl: PyHcclCommunicatorEx = None
+        self.sub_groups: dict[int, list[int]] = {}
+        self.comm: hcclComm_t = None
 
-    host: str
-    port: int
-    rank: int
-    world_size: int
-    device: torch.device
+        self.host: str = None
+        self.port: int = None
+        self.rank: int = None
+        self.world_size: int = None
+        self.device: torch.device = None
 
-    initialized: bool = False
+        self.initialized: bool = False
 
+    def init_process_group(
+        self,
+        host: str,
+        port: int,
+        rank: int,
+        world_size: int,
+        timeout: timedelta = timedelta(seconds=300),
+    ):
+        assert not self.initialized, "already initialized"
 
-dist = DistributedHccl()
+        self.host = host
+        self.port = port
+        self.rank = rank
+        self.world_size = world_size
+        self.device = torch.device("npu", rank)
 
-
-def init_process_group(
-    host: str,
-    port: int,
-    rank: int,
-    world_size: int,
-    timeout: timedelta = timedelta(seconds=300),
-    **kwargs,
-):
-    assert not dist.initialized, "already initialized"
-
-    dist.host = host
-    dist.port = port
-    dist.rank = rank
-    dist.world_size = world_size
-    dist.device = torch.device("npu", rank)
-
-    dist.pg = StatelessProcessGroup.create(
-        host, port, rank, world_size, store_timeout=int(timeout.total_seconds())
-    )
-    dist.pyhccl = PyHcclCommunicatorEx(group=dist.pg, device=dist.device)
-    dist.comm = dist.pyhccl.comm
-    dist.initialized = True
+        self.pg = StatelessProcessGroup.create(
+            host, port, rank, world_size, store_timeout=int(timeout.total_seconds())
+        )
+        self.pyhccl = PyHcclCommunicatorEx(group=self.pg, device=self.device)
+        self.comm = self.pyhccl.comm
+        self.initialized = True
 
 
-def destroy_process_group(group=None):
-    assert dist.initialized, "not initialized"
+    def destroy_process_group(
+        self,
+        group=None,
+    ):
+        assert self.initialized, "not initialized"
 
-    if group in dist.sub_groups:
-        subcomm = ctypes.c_void_p(group)
-        dist.pyhccl.destroy_comm(subcomm)
-        del dist.sub_groups[group]
-        return
+        if group in self.sub_groups:
+            subcomm = ctypes.c_void_p(group)
+            self.pyhccl.destroy_comm(subcomm)
+            del self.sub_groups[group]
+            return
 
-    dist.pyhccl.destroy_comm()
-
-    dist.pyhccl = None
-    dist.pg = None
-    dist.initialized = False
-
-
-def is_initialized() -> bool:
-    return dist.initialized
+        self.pyhccl.destroy_comm()
+        self.initialized = False
 
 
-def all_gather_object(object_list: list[Any], obj: Any, group=None):
-    assert dist.initialized, "not initialized"
-
-    if group:
-        assert group in dist.sub_groups, "invalid sub_group"
-        subcomm = ctypes.c_void_p(group)
-        dist.pyhccl.comm = subcomm
-
-    _common_all_gather_object(dist.pyhccl, dist.device, dist.world_size, object_list, obj)
-    current_stream().synchronize()
-
-    if group:
-        dist.pyhccl.comm = dist.comm
+    def is_initialized(self) -> bool:
+        return self.initialized
 
 
-def all_reduce(tensor: torch.Tensor, op=ReduceOp.SUM, group=None):
-    assert dist.initialized, "not initialized"
+    def all_gather_object(
+        self,
+        object_list: list[Any],
+        obj: Any,
+        group=None
+    ):
+        assert self.initialized, "not initialized"
 
-    if group:
-        assert group in dist.sub_groups, "invalid sub_group"
-        subcomm = ctypes.c_void_p(group)
-        dist.pyhccl.comm = subcomm
+        if group:
+            assert group in self.sub_groups, "invalid sub_group"
+            subcomm = ctypes.c_void_p(group)
+            self.pyhccl.comm = subcomm
 
-    out_tensor = dist.pyhccl.all_reduce(tensor, op)
-    current_stream().synchronize()
-    tensor.copy_(out_tensor)
+        _common_all_gather_object(self.pyhccl, self.device, self.world_size, object_list, obj)
+        current_stream().synchronize()
 
-    if group:
-        dist.pyhccl.comm = dist.comm
-
-
-def broadcast(tensor: torch.Tensor, src=None, group=None):
-    assert dist.initialized, "not initialized"
-
-    if group:
-        assert group in dist.sub_groups, "invalid sub_group"
-        assert src in dist.sub_groups[group], "src rank not in group"
-        subcomm = ctypes.c_void_p(group)
-        dist.pyhccl.comm = subcomm
-        # convert src rank id in default world to subcomm
-        src = dist.sub_groups[group].index(src)
-        dist.pyhccl.rank = dist.sub_groups[group].index(dist.rank)
-
-    dist.pyhccl.broadcast(tensor, src)
-    current_stream().synchronize()
-
-    if group:
-        dist.pyhccl.comm = dist.comm
-        dist.pyhccl.rank = dist.rank
+        if group:
+            self.pyhccl.comm = self.comm
 
 
-def barrier(group=None):
-    assert dist.initialized, "not initialized"
+    def all_reduce(
+        self,
+        tensor: torch.Tensor,
+        op=ReduceOp.SUM,
+        group=None
+    ):
+        assert self.initialized, "not initialized"
 
-    if group:
-        assert group in dist.sub_groups, "invalid sub_group"
-        subcomm = ctypes.c_void_p(group)
-        dist.pyhccl.comm = subcomm
+        if group:
+            assert group in self.sub_groups, "invalid sub_group"
+            subcomm = ctypes.c_void_p(group)
+            self.pyhccl.comm = subcomm
 
-    data = torch.zeros(1, device=dist.device)
-    dist.pyhccl.all_reduce(data)
-    current_stream().synchronize()
+        out_tensor = self.pyhccl.all_reduce(tensor, op)
+        current_stream().synchronize()
+        tensor.copy_(out_tensor)
 
-    if group:
-        dist.pyhccl.comm = dist.comm
+        if group:
+            self.pyhccl.comm = self.comm
 
 
-def new_group(ranks):
-    assert dist.initialized, "not initialized"
+    def broadcast(
+        self,
+        tensor: torch.Tensor,
+        src=None,
+        group=None
+    ):
+        assert self.initialized, "not initialized"
 
-    # if ranks is None or [], using the world instead
-    if not ranks:
-        ranks = list(range(dist.world_size))
+        if group:
+            assert group in self.sub_groups, "invalid sub_group"
+            assert src in self.sub_groups[group], "src rank not in group"
+            subcomm = ctypes.c_void_p(group)
+            self.pyhccl.comm = subcomm
+            # convert src rank id in default world to subcomm
+            src = self.sub_groups[group].index(src)
+            self.pyhccl.rank = self.sub_groups[group].index(self.rank)
 
-    if dist.rank not in ranks:
-        return
+        self.pyhccl.broadcast(tensor, src)
+        current_stream().synchronize()
 
-    subcomm = dist.pyhccl.create_subcomm(ranks)
-    value = 0
-    if subcomm:
-        value = subcomm.value
-        dist.sub_groups[value] = ranks
-    return value
+        if group:
+            self.pyhccl.comm = self.comm
+            self.pyhccl.rank = self.rank
+
+
+    def barrier(
+        self,
+        group=None
+    ):
+        assert self.initialized, "not initialized"
+
+        if group:
+            assert group in self.sub_groups, "invalid sub_group"
+            subcomm = ctypes.c_void_p(group)
+            self.pyhccl.comm = subcomm
+
+        data = torch.zeros(1, device=self.device)
+        self.pyhccl.all_reduce(data)
+        current_stream().synchronize()
+
+        if group:
+            self.pyhccl.comm = self.comm
+
+
+    def new_group(
+        self,
+        ranks
+    ):
+        assert self.initialized, "not initialized"
+
+        # if ranks is None or [], using the world instead
+        if not ranks:
+            ranks = list(range(self.world_size))
+
+        if self.rank not in ranks:
+            return
+
+        subcomm = self.pyhccl.create_subcomm(ranks)
+        value = 0
+        if subcomm:
+            value = subcomm.value
+            self.sub_groups[value] = ranks
+        return value
