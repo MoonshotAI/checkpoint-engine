@@ -150,7 +150,7 @@ def init_process_group(
         raise ValueError(f"Unsupported device type: {backend}")
 
     module_path, class_name = mapping[backend].rsplit(".", 1)
-    module = importlib.import_module(module_path, ".checkpoint_engine.distributed")
+    module = importlib.import_module(module_path, "checkpoint_engine.distributed")
     backend_class = getattr(module, class_name)
 
     _BACKEND_INSTANCE = backend_class()
