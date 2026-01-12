@@ -122,7 +122,7 @@ class DistributedNccl(Distributed):
         self.port = port
         self.rank = rank
         self.world_size = world_size
-        self.device = torch.device("cuda", rank)
+        self.device = torch.device("cuda", torch.cuda.current_device())
 
         self.pg = StatelessProcessGroup.create(
             host, port, rank, world_size, store_timeout=int(timeout.total_seconds())
