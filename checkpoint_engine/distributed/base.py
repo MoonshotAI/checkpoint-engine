@@ -166,7 +166,7 @@ def destroy_process_group(group=None):
 def is_initialized() -> bool:
     if _BACKEND_INSTANCE is None:
         return False
-    _BACKEND_INSTANCE.is_initialized()
+    return _BACKEND_INSTANCE.is_initialized()
 
 def all_gather_object(
     object_list: list[Any],
@@ -195,7 +195,7 @@ def broadcast(
 ):
     if _BACKEND_INSTANCE is None:
         raise RuntimeError("distribute module not initialized")
-    _BACKEND_INSTANCE.all_reduce(tensor, src, group)
+    _BACKEND_INSTANCE.broadcast(tensor, src, group)
 
 
 def barrier(group=None):
@@ -207,4 +207,4 @@ def barrier(group=None):
 def new_group(ranks: list[int]):
     if _BACKEND_INSTANCE is None:
         raise RuntimeError("distribute module not initialized")
-    _BACKEND_INSTANCE.new_group(ranks)
+    return _BACKEND_INSTANCE.new_group(ranks)
