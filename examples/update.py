@@ -10,7 +10,6 @@ from typing import Literal
 
 import httpx
 import torch
-import torch.distributed as dist
 from loguru import logger
 from safetensors import safe_open
 
@@ -159,16 +158,16 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-name", type=str, default="my-checkpoint-iter-0")
     parser.add_argument("--update-method", type=str, default="broadcast")
     parser.add_argument("--uds", type=str, default=None)
-    parser.add_argument("--device_type", type=str, default=None)
+    parser.add_argument("--custom-dist", action="store_true")
     args = parser.parse_args()
     rank = int(os.getenv("RANK"))
     world_size = int(os.getenv("WORLD_SIZE"))
 
-    if args.device_type is not None:
-        import checkpoint_engine.distributed as dist
+    if args.custom_dist:
+        setup_dist()
 
     req_func = req_inference(args.endpoint, args.inference_parallel_size, args.uds)
-    ps = ParameterServer(auto_pg=True, device_type=args.device_type)
+    ps = ParameterServer(auto_pg=True)
     if args.load_metas_file:
         join(
             ps,

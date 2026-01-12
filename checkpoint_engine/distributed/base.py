@@ -136,20 +136,20 @@ def init_process_group(
     port: int,
     rank: int,
     world_size: int,
-    device_type: str,
+    backend: str,
     timeout: timedelta = timedelta(seconds=300),
 ):
     global _BACKEND_INSTANCE
 
     mapping = {
-        "cuda": ".nccl.DistributedNccl",
-        "npu": ".hccl.DistributedHccl",
+        "nccl": ".nccl.DistributedNccl",
+        "hccl": ".hccl.DistributedHccl",
     }
 
-    if device_type not in mapping:
-        raise ValueError(f"Unsupported device type: {device_type}")
+    if backend not in mapping:
+        raise ValueError(f"Unsupported device type: {backend}")
 
-    module_path, class_name = mapping[device_type].rsplit(".", 1)
+    module_path, class_name = mapping[backend].rsplit(".", 1)
     module = importlib.import_module(module_path, ".checkpoint_engine.distributed")
     backend_class = getattr(module, class_name)
 

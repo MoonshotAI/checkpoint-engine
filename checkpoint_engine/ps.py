@@ -7,7 +7,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
+import torch.distributed
 import zmq
 from loguru import logger
 from torch.multiprocessing.reductions import reduce_tensor
@@ -24,6 +24,7 @@ from checkpoint_engine.data_types import (
 from checkpoint_engine.device_utils import DeviceManager, get_ip, npu_generate_uuid
 from checkpoint_engine.p2p_store import P2PStore
 from checkpoint_engine.pin_memory import _ALIGN_SIZE, _register_checkpoint
+from checkpoint_engine.dist_wrapper import dist
 
 
 if TYPE_CHECKING:
@@ -175,7 +176,6 @@ class ParameterServer:
         auto_pg: bool = True,
         gpu_count: int | None = None,
         mem_fraction: float | None = None,
-        device_type: str | None = None,
     ):
         """
         Initialize the parameter server. env RANK, WORLD_SIZE and MASTER_ADDR must be set.
@@ -196,12 +196,6 @@ class ParameterServer:
         self._local_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._remote_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._mem_fraction = mem_fraction or float(os.getenv("PS_MEM_FRACTION", "0.9"))
-        global dist
-        if device_type is not None:
-            import checkpoint_engine.distributed as dist
-            self._device_type = device_type
-        else:
-            self._device_type = "torch"
 
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
@@ -497,7 +491,7 @@ class ParameterServer:
         """
         master_addr = master_addr or os.getenv("MASTER_ADDR")
         assert master_addr, "master_addr is required"
-        if self._device_type == "torch":
+        if dist is torch.distributed:
             store = torch.distributed.TCPStore(
                 master_addr,
                 _get_master_port(master_port),
@@ -518,7 +512,7 @@ class ParameterServer:
                 port=_get_master_port(master_port),
                 rank=self._rank,
                 world_size=self._world_size,
-                device_type=self._device_type,
+                backend=self.device_manager.backend,
                 timeout=timeout,
             )
         logger.info(f"[rank{self._rank}] init process group successfully.")
