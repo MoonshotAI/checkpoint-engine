@@ -15,6 +15,7 @@ from safetensors import safe_open
 
 from checkpoint_engine import request_inference_to_update
 from checkpoint_engine.ps import ParameterServer
+import checkpoint_engine.distributed as dist
 
 
 @contextmanager
@@ -163,11 +164,8 @@ if __name__ == "__main__":
     rank = int(os.getenv("RANK"))
     world_size = int(os.getenv("WORLD_SIZE"))
 
-    if args.custom_dist:
-        setup_dist()
-
     req_func = req_inference(args.endpoint, args.inference_parallel_size, args.uds)
-    ps = ParameterServer(auto_pg=True)
+    ps = ParameterServer(auto_pg=True, custom_dist=args.custom_dist)
     if args.load_metas_file:
         join(
             ps,

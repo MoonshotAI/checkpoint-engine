@@ -6,7 +6,7 @@ from typing import Any, List
 import importlib
 
 import torch
-from torch.distributed import ReduceOp
+import torch.distributed as torch_dist
 
 
 class Distributed(ABC):
@@ -45,7 +45,7 @@ class Distributed(ABC):
     def all_reduce(
         self,
         tensor: torch.Tensor,
-        op :ReduceOp,
+        op :torch_dist.ReduceOp,
         group,
     ):
         raise NotImplementedError
@@ -159,13 +159,14 @@ def init_process_group(
 
 def destroy_process_group(group=None):
     if _BACKEND_INSTANCE is None:
-        raise RuntimeError("distribute module not initialized")
+        torch_dist.destroy_process_group(group)
+        return
     _BACKEND_INSTANCE.destroy_process_group(group)
 
 
 def is_initialized() -> bool:
     if _BACKEND_INSTANCE is None:
-        return False
+        return torch_dist.is_initialized()
     return _BACKEND_INSTANCE.is_initialized()
 
 def all_gather_object(
@@ -174,37 +175,43 @@ def all_gather_object(
     group=None,
 ):
     if _BACKEND_INSTANCE is None:
-        raise RuntimeError("distribute module not initialized")
+        torch_dist.all_gather_object(object_list, obj, group)
+        return
     _BACKEND_INSTANCE.all_gather_object(object_list, obj, group)
 
 
 def all_reduce(
     tensor: torch.Tensor,
-    op=ReduceOp.SUM,
+    op=torch_dist.ReduceOp.SUM,
     group=None,
+    **kwargs,
 ):
     if _BACKEND_INSTANCE is None:
-        raise RuntimeError("distribute module not initialized")
+        torch_dist.all_reduce(tensor, op, group, **kwargs)
+        return
     _BACKEND_INSTANCE.all_reduce(tensor, op, group)
 
 
 def broadcast(
     tensor: torch.Tensor,
-    src= None,
+    src=None,
     group=None,
+    **kwargs,
 ):
     if _BACKEND_INSTANCE is None:
-        raise RuntimeError("distribute module not initialized")
+        torch_dist.broadcast(tensor, src, group, **kwargs)
+        return
     _BACKEND_INSTANCE.broadcast(tensor, src, group)
 
 
-def barrier(group=None):
+def barrier(group=None, **kwargs):
     if _BACKEND_INSTANCE is None:
-        raise RuntimeError("distribute module not initialized")
+        torch_dist.barrier(group, **kwargs)
+        return
     _BACKEND_INSTANCE.barrier(group)
 
 
-def new_group(ranks: list[int]):
+def new_group(ranks: list[int], **kwargs):
     if _BACKEND_INSTANCE is None:
-        raise RuntimeError("distribute module not initialized")
+        return torch_dist.new_group(ranks, **kwargs)
     return _BACKEND_INSTANCE.new_group(ranks)

@@ -24,7 +24,7 @@ from checkpoint_engine.data_types import (
 from checkpoint_engine.device_utils import DeviceManager, get_ip, npu_generate_uuid
 from checkpoint_engine.p2p_store import P2PStore
 from checkpoint_engine.pin_memory import _ALIGN_SIZE, _register_checkpoint
-from checkpoint_engine.dist_wrapper import dist
+import checkpoint_engine.distributed as dist
 
 
 if TYPE_CHECKING:
@@ -176,6 +176,7 @@ class ParameterServer:
         auto_pg: bool = True,
         gpu_count: int | None = None,
         mem_fraction: float | None = None,
+        custom_dist: bool = False,
     ):
         """
         Initialize the parameter server. env RANK, WORLD_SIZE and MASTER_ADDR must be set.
@@ -196,6 +197,7 @@ class ParameterServer:
         self._local_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._remote_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._mem_fraction = mem_fraction or float(os.getenv("PS_MEM_FRACTION", "0.9"))
+        self._custom_dist = custom_dist
 
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
@@ -491,7 +493,7 @@ class ParameterServer:
         """
         master_addr = master_addr or os.getenv("MASTER_ADDR")
         assert master_addr, "master_addr is required"
-        if dist is torch.distributed:
+        if not self._custom_dist:
             store = torch.distributed.TCPStore(
                 master_addr,
                 _get_master_port(master_port),
@@ -518,7 +520,7 @@ class ParameterServer:
         logger.info(f"[rank{self._rank}] init process group successfully.")
 
     def store_based_barrier(
-        self, store: dist.TCPStore, timeout: timedelta = timedelta(minutes=5)
+        self, store, timeout: timedelta = timedelta(minutes=5)
     ) -> None:
         """
         Perform a store-based barrier synchronization across all ranks.
@@ -606,7 +608,7 @@ class ParameterServer:
         return socket, socket_paths
 
     def _detect_bucket_size(
-        self, ranks_group: dist.ProcessGroup | None, *, disable_h2d_buffer: bool = False
+        self, ranks_group, *, disable_h2d_buffer: bool = False
     ) -> tuple[int, bool]:
         GiB = 1 << 30  # noqa: N806
         # auto detect bucket size
@@ -725,7 +727,7 @@ class ParameterServer:
         self,
         checkpoint_name: str,
         req_func: Callable[[list[tuple[str, str]]], None],
-        ranks_group: dist.ProcessGroup | None,
+        ranks_group,
         ranks: list[int] | None = None,
     ):
         assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"
