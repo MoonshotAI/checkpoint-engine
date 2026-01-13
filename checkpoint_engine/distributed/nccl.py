@@ -146,7 +146,6 @@ class DistributedNccl(Distributed):
             return
 
         self.pynccl.destroy_comm()
-
         self.pynccl = None
         self.pg = None
         self.initialized = False

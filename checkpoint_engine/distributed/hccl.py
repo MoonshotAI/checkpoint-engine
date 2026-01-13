@@ -228,6 +228,8 @@ class DistributedHccl(Distributed):
             return
 
         self.pyhccl.destroy_comm()
+        self.pyhccl = None
+        self.pg = None
         self.initialized = False
 
 
