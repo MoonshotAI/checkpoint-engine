@@ -45,7 +45,7 @@ class Distributed(ABC):
     def all_reduce(
         self,
         tensor: torch.Tensor,
-        op :torch_dist.ReduceOp,
+        op: torch_dist.ReduceOp,
         group,
     ):
         raise NotImplementedError
