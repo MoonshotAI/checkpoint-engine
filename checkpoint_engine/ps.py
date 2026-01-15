@@ -411,6 +411,7 @@ class ParameterServer:
             torch._C._host_emptyCache()
         else:
             import gc
+
             gc.collect()
 
     def gather_metas(self, checkpoint_name: str):
