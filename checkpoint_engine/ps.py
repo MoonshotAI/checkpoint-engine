@@ -407,7 +407,11 @@ class ParameterServer:
             del self._memory_pool[checkpoint_name]
         # see https://github.com/pytorch/pytorch/blob/31d5c675394705f8a6bc767f80ae14bf4f01246b/torch/csrc/cuda/Module.cpp#L2018
         # this works by using torch>=2.5.0
-        torch._C._host_emptyCache()
+        if self.device_manager.device_type == "cuda":
+            torch._C._host_emptyCache()
+        else:
+            import gc
+            gc.collect()
 
     def gather_metas(self, checkpoint_name: str):
         """
