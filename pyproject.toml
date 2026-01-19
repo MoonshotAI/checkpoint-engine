@@ -7,7 +7,6 @@ requires-python = ">=3.10"
 
 dependencies = [
     "torch>=2.5.0",
-    "vllm",
     "fastapi",
     "pydantic>=2.0.0",
     "safetensors",

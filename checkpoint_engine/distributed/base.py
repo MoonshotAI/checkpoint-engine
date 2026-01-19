@@ -7,8 +7,6 @@ from typing import Any
 
 import torch
 import torch.distributed as torch_dist
-from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
 
 
 class Distributed(ABC):
@@ -114,7 +112,7 @@ def _flatten_for_scatter_gather(
 
 
 def _common_all_gather_object(
-    comm: PyNcclCommunicator | PyHcclCommunicator | Any,
+    comm: Any,
     device: torch.device,
     world_size: int,
     object_list: list[Any],
