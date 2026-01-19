@@ -391,7 +391,11 @@ class ParameterServer:
                 )
                 cudart = torch.cuda.cudart()
                 r = cudart.cudaHostUnregister(t.data_ptr())
-                assert r == 0, f"unpin memory error, error code: {r}"
+                if r != 0:
+                    error_msg = cudart.cudaGetErrorString(r)
+                    raise RuntimeError(
+                        f"unpin memory error, error code: {r}, error message: {error_msg}"
+                    )
 
             # if the checkpoint is pinned by cudaHostRegister manually, we need to unpin it manually
             try:

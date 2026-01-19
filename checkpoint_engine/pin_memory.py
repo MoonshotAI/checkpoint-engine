@@ -209,7 +209,9 @@ def _inplace_pin_memory(files: list[str], rank: int | None = None) -> list[Memor
             torch.cuda.set_device(device_index)
             cudart = torch.cuda.cudart()
             r = cudart.cudaHostRegister(t.data_ptr(), t.numel() * t.element_size(), 0)
-            assert r == 0, f"pin memory error, error code: {r}"
+            if r != 0:
+                error_msg = cudart.cudaGetErrorString(r)
+                raise RuntimeError(f"pin memory error, error code: {r}, error message: {error_msg}")
 
         # TODO: should only support /dev/shm? but we found files in disk also work?
         size = os.stat(file_path).st_size
