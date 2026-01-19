@@ -47,6 +47,7 @@ def _init_api(ps: ParameterServer) -> Any:
 
     class RegisterRequest(BaseModel):
         files: list[str]
+        use_inplace_pin_memory: bool | None = None
 
     class UpdateRequest(BaseModel):
         ranks: list[int] = []
@@ -65,7 +66,11 @@ def _init_api(ps: ParameterServer) -> Any:
 
     @app.post("/v1/checkpoints/{checkpoint_name}/files")
     async def register_files(checkpoint_name: str, req: RegisterRequest, raw: Request) -> Response:
-        return wrap_exception(lambda: ps.register_checkpoint(checkpoint_name, files=req.files))
+        return wrap_exception(
+            lambda: ps.register_checkpoint(
+                checkpoint_name, files=req.files, use_inplace_pin_memory=req.use_inplace_pin_memory
+            )
+        )
 
     @app.delete("/v1/checkpoints/{checkpoint_name}")
     async def unregister_checkpoint(checkpoint_name: str) -> Response:
