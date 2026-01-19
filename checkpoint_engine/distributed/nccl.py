@@ -1,6 +1,6 @@
 import ctypes
 from datetime import timedelta
-from typing import Any, List, Optional
+from typing import Any
 
 import torch
 from torch.distributed import ReduceOp
@@ -8,12 +8,12 @@ from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     Function,
     NCCLLibrary,
-    buffer_type,
     ncclComm_t,
     ncclResult_t,
 )
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils import current_stream
+
 from checkpoint_engine.distributed.base import Distributed, _common_all_gather_object
 
 
@@ -132,7 +132,6 @@ class DistributedNccl(Distributed):
         self.comm = self.pynccl.comm
         self.initialized = True
 
-
     def destroy_process_group(
         self,
         group=None,
@@ -150,17 +149,10 @@ class DistributedNccl(Distributed):
         self.pg = None
         self.initialized = False
 
-
     def is_initialized(self) -> bool:
         return self.initialized
 
-
-    def all_gather_object(
-        self,
-        object_list: list[Any],
-        obj: Any,
-        group=None
-    ):
+    def all_gather_object(self, object_list: list[Any], obj: Any, group=None):
         assert self.initialized, "not initialized"
 
         if group:
@@ -174,13 +166,7 @@ class DistributedNccl(Distributed):
         if group:
             self.pynccl.comm = self.comm
 
-
-    def all_reduce(
-        self,
-        tensor: torch.Tensor,
-        op=ReduceOp.SUM,
-        group=None
-    ):
+    def all_reduce(self, tensor: torch.Tensor, op=ReduceOp.SUM, group=None):
         assert self.initialized, "not initialized"
 
         if group:
@@ -195,13 +181,7 @@ class DistributedNccl(Distributed):
         if group:
             self.pynccl.comm = self.comm
 
-
-    def broadcast(
-        self,
-        tensor: torch.Tensor,
-        src=None,
-        group=None
-    ):
+    def broadcast(self, tensor: torch.Tensor, src=None, group=None):
         assert self.initialized, "not initialized"
 
         if group:
@@ -220,11 +200,7 @@ class DistributedNccl(Distributed):
             self.pynccl.comm = self.comm
             self.pynccl.rank = self.rank
 
-
-    def barrier(
-        self,
-        group=None
-    ):
+    def barrier(self, group=None):
         assert self.initialized, "not initialized"
 
         if group:
@@ -239,11 +215,7 @@ class DistributedNccl(Distributed):
         if group:
             self.pynccl.comm = self.comm
 
-
-    def new_group(
-        self,
-        ranks
-    ):
+    def new_group(self, ranks):
         assert self.initialized, "not initialized"
 
         # ranks is None or []

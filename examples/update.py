@@ -13,9 +13,9 @@ import torch
 from loguru import logger
 from safetensors import safe_open
 
+import checkpoint_engine.distributed as dist
 from checkpoint_engine import request_inference_to_update
 from checkpoint_engine.ps import ParameterServer
-import checkpoint_engine.distributed as dist
 
 
 @contextmanager

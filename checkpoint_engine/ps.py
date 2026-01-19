@@ -12,6 +12,7 @@ import zmq
 from loguru import logger
 from torch.multiprocessing.reductions import reduce_tensor
 
+import checkpoint_engine.distributed as dist
 from checkpoint_engine.data_types import (
     BucketRange,
     DataToGather,
@@ -24,7 +25,6 @@ from checkpoint_engine.data_types import (
 from checkpoint_engine.device_utils import DeviceManager, get_ip, npu_generate_uuid
 from checkpoint_engine.p2p_store import P2PStore
 from checkpoint_engine.pin_memory import _ALIGN_SIZE, _register_checkpoint
-import checkpoint_engine.distributed as dist
 
 
 if TYPE_CHECKING:
@@ -519,9 +519,7 @@ class ParameterServer:
             )
         logger.info(f"[rank{self._rank}] init process group successfully.")
 
-    def store_based_barrier(
-        self, store, timeout: timedelta = timedelta(minutes=5)
-    ) -> None:
+    def store_based_barrier(self, store, timeout: timedelta = timedelta(minutes=5)) -> None:
         """
         Perform a store-based barrier synchronization across all ranks.
 
@@ -571,11 +569,10 @@ class ParameterServer:
         try:
             master_addr = os.getenv("MASTER_ADDR") or master_addr
             assert master_addr, "master_addr is required"
-            if self._auto_pg:
-                if not dist.is_initialized():
-                    self.init_process_group(
-                        timeout=timeout, master_addr=master_addr, master_port=master_port
-                    )
+            if self._auto_pg and not dist.is_initialized():
+                self.init_process_group(
+                    timeout=timeout, master_addr=master_addr, master_port=master_port
+                )
             # if ranks is None or [], it will use fully broadcast to update to all ranks
             ranks_group = dist.new_group(ranks) if ranks else None
             self._update_per_bucket(checkpoint_name, req_func, ranks_group, ranks)

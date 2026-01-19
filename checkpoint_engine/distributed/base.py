@@ -1,9 +1,9 @@
-from abc import ABC, abstractmethod
+import importlib
 import io
 import pickle
+from abc import ABC, abstractmethod
 from datetime import timedelta
-from typing import Any, List
-import importlib
+from typing import Any
 
 import torch
 import torch.distributed as torch_dist
@@ -168,6 +168,7 @@ def is_initialized() -> bool:
     if _BACKEND_INSTANCE is None:
         return torch_dist.is_initialized()
     return _BACKEND_INSTANCE.is_initialized()
+
 
 def all_gather_object(
     object_list: list[Any],
