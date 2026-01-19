@@ -410,6 +410,7 @@ class ParameterServer:
         if self.device_manager.device_type == "cuda":
             torch._C._host_emptyCache()
         else:
+            # torch._C._host_emptyCache() is not supported on NPU, so we call gc.collect() to empty host cache.
             import gc
 
             gc.collect()
