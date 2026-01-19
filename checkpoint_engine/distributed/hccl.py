@@ -1,6 +1,6 @@
 import ctypes
 from datetime import timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 from torch.distributed import ReduceOp
@@ -22,7 +22,7 @@ from checkpoint_engine.distributed.base import Distributed, _common_all_gather_o
 
 
 class HcclCommConfig(ctypes.Structure):
-    _fields_ = [
+    _fields_: ClassVar[list[tuple[str, Any]]] = [
         ("size", ctypes.c_size_t),
         ("magic_word", ctypes.c_uint32),
         ("version", ctypes.c_uint32),
@@ -81,15 +81,29 @@ extended_functions = [
 ]
 
 
-def hccl_all_gather(self, send_buf, recv_buf, count, data_type, comm, stream):
+def hccl_all_gather(
+    self,  # noqa: ANN001
+    send_buf: buffer_type,
+    recv_buf: buffer_type,
+    count: ctypes.c_uint64,
+    data_type: hcclDataType_t,
+    comm: hcclComm_t,
+    stream: aclrtStream_t,
+):
     self.HCCL_CHECK(
         self._funcs["HcclAllGather"](send_buf, recv_buf, count, data_type, comm, stream)
     )
 
 
 def hccl_create_subcomm_config(
-    self, comm, ranks_size, c_rank_ids, subcomm_id, subcomm_rank, comm_config
-):
+    self,  # noqa: ANN001
+    comm: hcclComm_t,
+    ranks_size: ctypes.c_uint32,
+    c_rank_ids: ctypes.POINTER(ctypes.c_uint32),
+    subcomm_id: ctypes.c_uint64,
+    subcomm_rank: ctypes.c_uint64,
+    comm_config: HcclCommConfig,
+) -> hcclComm_t:
     subcomm = hcclComm_t()
     self.HCCL_CHECK(
         self._funcs["HcclCreateSubCommConfig"](
@@ -112,17 +126,19 @@ HCCLLibrary.hcclCreateSubCommConfig = hccl_create_subcomm_config
 
 
 class PyHcclCommunicatorEx(PyHcclCommunicator):
-    def __init__(self, group, device):
+    def __init__(self, group: StatelessProcessGroup, device: torch.device):
         super().__init__(group, device)
         self.subcomm_id = 1
 
-    def destroy_comm(self, comm=None):
+    def destroy_comm(self, comm: hcclComm_t = None):
         if comm:
             self.hccl.hcclCommDestroy(comm)
         else:
             self.hccl.hcclCommDestroy(self.comm)
 
-    def all_gather(self, out_tensor: torch.Tensor, in_tensor: torch.Tensor, stream=None):
+    def all_gather(
+        self, out_tensor: torch.Tensor, in_tensor: torch.Tensor, stream: torch.npu.Stream = None
+    ) -> torch.Tensor:
         if self.disabled:
             return
         assert in_tensor.device == self.device, (
@@ -141,7 +157,7 @@ class PyHcclCommunicatorEx(PyHcclCommunicator):
         )
         return out_tensor
 
-    def create_subcomm(self, ranks):
+    def create_subcomm(self, ranks: list[int]) -> hcclComm_t:
         comm_config = HcclCommConfig(
             size=312,
             magic_word=0xF0F0F0F0,
@@ -214,7 +230,7 @@ class DistributedHccl(Distributed):
 
     def destroy_process_group(
         self,
-        group=None,
+        group: int | None = None,
     ):
         assert self.initialized, "not initialized"
 
@@ -232,7 +248,7 @@ class DistributedHccl(Distributed):
     def is_initialized(self) -> bool:
         return self.initialized
 
-    def all_gather_object(self, object_list: list[Any], obj: Any, group=None):
+    def all_gather_object(self, object_list: list[Any], obj: Any, group: int | None = None):
         assert self.initialized, "not initialized"
 
         if group:
@@ -246,7 +262,9 @@ class DistributedHccl(Distributed):
         if group:
             self.pyhccl.comm = self.comm
 
-    def all_reduce(self, tensor: torch.Tensor, op=ReduceOp.SUM, group=None):
+    def all_reduce(
+        self, tensor: torch.Tensor, op: ReduceOp = ReduceOp.SUM, group: int | None = None
+    ):
         assert self.initialized, "not initialized"
 
         if group:
@@ -261,7 +279,7 @@ class DistributedHccl(Distributed):
         if group:
             self.pyhccl.comm = self.comm
 
-    def broadcast(self, tensor: torch.Tensor, src=None, group=None):
+    def broadcast(self, tensor: torch.Tensor, src: int | None = None, group: int | None = None):
         assert self.initialized, "not initialized"
 
         if group:
@@ -280,7 +298,7 @@ class DistributedHccl(Distributed):
             self.pyhccl.comm = self.comm
             self.pyhccl.rank = self.rank
 
-    def barrier(self, group=None):
+    def barrier(self, group: int | None = None):
         assert self.initialized, "not initialized"
 
         if group:
@@ -295,7 +313,7 @@ class DistributedHccl(Distributed):
         if group:
             self.pyhccl.comm = self.comm
 
-    def new_group(self, ranks):
+    def new_group(self, ranks: list[int]) -> int:
         assert self.initialized, "not initialized"
 
         # if ranks is None or [], using the world instead

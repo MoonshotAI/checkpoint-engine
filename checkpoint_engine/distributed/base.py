@@ -7,6 +7,8 @@ from typing import Any
 
 import torch
 import torch.distributed as torch_dist
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
 
 
 class Distributed(ABC):
@@ -24,7 +26,7 @@ class Distributed(ABC):
     @abstractmethod
     def destroy_process_group(
         self,
-        group,
+        group: torch_dist.ProcessGroup | int | None = None,
     ):
         raise NotImplementedError
 
@@ -37,7 +39,7 @@ class Distributed(ABC):
         self,
         object_list: list[Any],
         obj: Any,
-        group,
+        group: torch_dist.ProcessGroup | int | None = None,
     ):
         raise NotImplementedError
 
@@ -46,7 +48,7 @@ class Distributed(ABC):
         self,
         tensor: torch.Tensor,
         op: torch_dist.ReduceOp,
-        group,
+        group: torch_dist.ProcessGroup | int | None = None,
     ):
         raise NotImplementedError
 
@@ -55,14 +57,14 @@ class Distributed(ABC):
         self,
         tensor: torch.Tensor,
         src: int,
-        group,
+        group: torch_dist.ProcessGroup | int | None = None,
     ):
         raise NotImplementedError
 
     @abstractmethod
     def barrier(
         self,
-        group,
+        group: torch_dist.ProcessGroup | int | None = None,
     ):
         raise NotImplementedError
 
@@ -81,7 +83,7 @@ _pickler = pickle.Pickler
 _unpickler = pickle.Unpickler
 
 
-def _object_to_tensor(obj, device):
+def _object_to_tensor(obj: Any, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     f = io.BytesIO()
     _pickler(f).dump(obj)
     byte_storage = torch.ByteStorage._from_buffer(f.getvalue())
@@ -90,13 +92,15 @@ def _object_to_tensor(obj, device):
     return byte_tensor, local_size
 
 
-def _tensor_to_object(tensor, tensor_size):
+def _tensor_to_object(tensor: torch.Tensor, tensor_size: int) -> Any:
     tensor = tensor.cpu()
     buf = tensor.numpy().tobytes()[:tensor_size]
     return _unpickler(io.BytesIO(buf)).load()
 
 
-def _flatten_for_scatter_gather(tensor_list, copy=False):
+def _flatten_for_scatter_gather(
+    tensor_list: list[torch.Tensor], copy: bool = False
+) -> torch.Tensor:
     if not tensor_list:
         raise RuntimeError("Received an empty list.")
     t = tensor_list[0]
@@ -109,7 +113,13 @@ def _flatten_for_scatter_gather(tensor_list, copy=False):
     return buffer
 
 
-def _common_all_gather_object(comm, device, world_size, object_list, object):
+def _common_all_gather_object(
+    comm: PyNcclCommunicator | PyHcclCommunicator | Any,
+    device: torch.device,
+    world_size: int,
+    object_list: list[Any],
+    object: Any,
+):
     input_tensor, local_size = _object_to_tensor(object, device)
     object_sizes_tensor = torch.empty(world_size, dtype=torch.long, device=device)
     comm.all_gather(object_sizes_tensor, local_size)
@@ -157,7 +167,7 @@ def init_process_group(
     _BACKEND_INSTANCE.init_process_group(host, port, rank, world_size, timeout)
 
 
-def destroy_process_group(group=None):
+def destroy_process_group(group: torch_dist.ProcessGroup | int | None = None):
     if _BACKEND_INSTANCE is None:
         torch_dist.destroy_process_group(group)
         return
@@ -173,7 +183,7 @@ def is_initialized() -> bool:
 def all_gather_object(
     object_list: list[Any],
     obj: Any,
-    group=None,
+    group: torch_dist.ProcessGroup | int | None = None,
 ):
     if _BACKEND_INSTANCE is None:
         torch_dist.all_gather_object(object_list, obj, group)
@@ -183,8 +193,8 @@ def all_gather_object(
 
 def all_reduce(
     tensor: torch.Tensor,
-    op=torch_dist.ReduceOp.SUM,
-    group=None,
+    op: torch_dist.ReduceOp = torch_dist.ReduceOp.SUM,
+    group: torch_dist.ProcessGroup | int | None = None,
     **kwargs,
 ):
     if _BACKEND_INSTANCE is None:
@@ -195,8 +205,8 @@ def all_reduce(
 
 def broadcast(
     tensor: torch.Tensor,
-    src=None,
-    group=None,
+    src: int = 0,
+    group: torch_dist.ProcessGroup | int | None = None,
     **kwargs,
 ):
     if _BACKEND_INSTANCE is None:
@@ -205,14 +215,14 @@ def broadcast(
     _BACKEND_INSTANCE.broadcast(tensor, src, group)
 
 
-def barrier(group=None, **kwargs):
+def barrier(group: torch_dist.ProcessGroup | int | None = None, **kwargs):
     if _BACKEND_INSTANCE is None:
         torch_dist.barrier(group, **kwargs)
         return
     _BACKEND_INSTANCE.barrier(group)
 
 
-def new_group(ranks: list[int], **kwargs):
+def new_group(ranks: list[int], **kwargs) -> torch_dist.ProcessGroup | int | None:
     if _BACKEND_INSTANCE is None:
         return torch_dist.new_group(ranks, **kwargs)
     return _BACKEND_INSTANCE.new_group(ranks)

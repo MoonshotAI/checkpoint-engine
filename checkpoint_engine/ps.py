@@ -519,7 +519,9 @@ class ParameterServer:
             )
         logger.info(f"[rank{self._rank}] init process group successfully.")
 
-    def store_based_barrier(self, store, timeout: timedelta = timedelta(minutes=5)) -> None:
+    def store_based_barrier(
+        self, store: torch.distributed.TCPStore, timeout: timedelta = timedelta(minutes=5)
+    ) -> None:
         """
         Perform a store-based barrier synchronization across all ranks.
 
@@ -605,7 +607,10 @@ class ParameterServer:
         return socket, socket_paths
 
     def _detect_bucket_size(
-        self, ranks_group, *, disable_h2d_buffer: bool = False
+        self,
+        ranks_group: torch.distributed.ProcessGroup | int | None,
+        *,
+        disable_h2d_buffer: bool = False,
     ) -> tuple[int, bool]:
         GiB = 1 << 30  # noqa: N806
         # auto detect bucket size
@@ -724,7 +729,7 @@ class ParameterServer:
         self,
         checkpoint_name: str,
         req_func: Callable[[list[tuple[str, str]]], None],
-        ranks_group,
+        ranks_group: torch.distributed.ProcessGroup | int | None,
         ranks: list[int] | None = None,
     ):
         assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"

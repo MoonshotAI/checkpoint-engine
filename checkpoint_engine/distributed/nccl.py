@@ -1,6 +1,6 @@
 import ctypes
 from datetime import timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 from torch.distributed import ReduceOp
@@ -17,8 +17,8 @@ from vllm.utils import current_stream
 from checkpoint_engine.distributed.base import Distributed, _common_all_gather_object
 
 
-class ncclConfig_t(ctypes.Structure):
-    _fields_ = [
+class NcclConfigT(ctypes.Structure):
+    _fields_: ClassVar[list[tuple[str, Any]]] = [
         ("size", ctypes.c_size_t),
         ("magic", ctypes.c_uint),
         ("version", ctypes.c_uint),
@@ -44,7 +44,7 @@ class ncclConfig_t(ctypes.Structure):
 nccl_orig_exported_functions = NCCLLibrary.exported_functions
 nccl_extended_functions = [
     # ncclResult_t ncclCommSplit(
-    #   ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t *config
+    # ncclComm_t comm, int color, int key, ncclComm_t *newcomm, NcclConfigT *config
     # )
     Function(
         "ncclCommSplit",
@@ -54,14 +54,14 @@ nccl_extended_functions = [
             ctypes.c_int,
             ctypes.c_int,
             ctypes.POINTER(ncclComm_t),
-            ctypes.POINTER(ncclConfig_t),
+            ctypes.POINTER(NcclConfigT),
         ],
     ),
 ]
 
 
 def nccl_comm_split(
-    self,
+    self,  # noqa: ANN001
     comm: ncclComm_t,
     color: int,
     key: int,
@@ -78,13 +78,13 @@ NCCLLibrary.ncclCommSplit = nccl_comm_split
 
 
 class PyNcclCommunicatorEx(PyNcclCommunicator):
-    def destroy_comm(self, comm=None):
+    def destroy_comm(self, comm: ncclComm_t = None):
         if comm:
             self.nccl.ncclCommDestroy(comm)
         else:
             self.nccl.ncclCommDestroy(self.comm)
 
-    def create_newcomm(self, ranks):
+    def create_newcomm(self, ranks: list[int]) -> ncclComm_t:
         if self.rank in ranks:
             color = 0
         else:
@@ -134,7 +134,7 @@ class DistributedNccl(Distributed):
 
     def destroy_process_group(
         self,
-        group=None,
+        group: int | None = None,
     ):
         assert self.initialized, "not initialized"
 
@@ -152,7 +152,7 @@ class DistributedNccl(Distributed):
     def is_initialized(self) -> bool:
         return self.initialized
 
-    def all_gather_object(self, object_list: list[Any], obj: Any, group=None):
+    def all_gather_object(self, object_list: list[Any], obj: Any, group: int | None = None):
         assert self.initialized, "not initialized"
 
         if group:
@@ -166,7 +166,9 @@ class DistributedNccl(Distributed):
         if group:
             self.pynccl.comm = self.comm
 
-    def all_reduce(self, tensor: torch.Tensor, op=ReduceOp.SUM, group=None):
+    def all_reduce(
+        self, tensor: torch.Tensor, op: ReduceOp = ReduceOp.SUM, group: int | None = None
+    ):
         assert self.initialized, "not initialized"
 
         if group:
@@ -181,7 +183,7 @@ class DistributedNccl(Distributed):
         if group:
             self.pynccl.comm = self.comm
 
-    def broadcast(self, tensor: torch.Tensor, src=None, group=None):
+    def broadcast(self, tensor: torch.Tensor, src: int | None = None, group: int | None = None):
         assert self.initialized, "not initialized"
 
         if group:
@@ -200,7 +202,7 @@ class DistributedNccl(Distributed):
             self.pynccl.comm = self.comm
             self.pynccl.rank = self.rank
 
-    def barrier(self, group=None):
+    def barrier(self, group: int | None = None):
         assert self.initialized, "not initialized"
 
         if group:
@@ -215,7 +217,7 @@ class DistributedNccl(Distributed):
         if group:
             self.pynccl.comm = self.comm
 
-    def new_group(self, ranks):
+    def new_group(self, ranks: list[int]) -> int:
         assert self.initialized, "not initialized"
 
         # ranks is None or []
