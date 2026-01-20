@@ -209,7 +209,9 @@ def _inplace_pin_memory(files: list[str], rank: int | None = None) -> list[Memor
             torch.cuda.set_device(device_index)
             cudart = torch.cuda.cudart()
             r = cudart.cudaHostRegister(t.data_ptr(), t.numel() * t.element_size(), 0)
-            assert r == 0, f"pin memory error, error code: {r}"
+            if r != 0:
+                error_msg = cudart.cudaGetErrorString(r)
+                raise RuntimeError(f"pin memory error, error code: {r}, error message: {error_msg}")
 
         # TODO: should only support /dev/shm? but we found files in disk also work?
         size = os.stat(file_path).st_size
@@ -254,6 +256,12 @@ def _inplace_pin_memory(files: list[str], rank: int | None = None) -> list[Memor
         # Remove the file after successfully loading. This will avoid doubling the memory usage.
         # We assume files in /dev/shm/ are temporary files. So it's safe to remove them after loading.
         os.remove(file_path)
+        if not metas:
+            # TODO: should we still return this buffer?
+            assert buffer.nbytes == 0, f"buffer nbytes {buffer.nbytes} should be 0"
+            logger.warning(f"[rank{rank}] no metas found in {file_path}, skip pin memory")
+            return MemoryBuffer(buffer=buffer, size=buffer.nbytes, metas=[], manually_pinned=False)
+
         _pin(buffer)
         logger.info(
             f"[rank{rank}] inplace pin memory for file {file_path} finished, size {buffer.nbytes / 1024 / 1024:.2f}MiB"
