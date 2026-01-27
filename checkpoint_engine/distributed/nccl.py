@@ -1,4 +1,5 @@
 import ctypes
+from contextlib import contextmanager
 from datetime import timedelta
 from typing import Any, ClassVar
 
@@ -14,7 +15,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils import current_stream
 
-from checkpoint_engine.distributed.base import Distributed, _common_all_gather_object
+from checkpoint_engine.distributed.base import CommGroup, Distributed, _common_all_gather_object
 
 
 class NcclConfigT(ctypes.Structure):
@@ -108,6 +109,28 @@ class DistributedNccl(Distributed):
 
         self.initialized: bool = False
 
+    @contextmanager
+    def _use_group(self, group: CommGroup | None, src: int | None = None):
+        if group:
+            assert group.handle() in self.sub_groups, "invalid sub_group"
+            newcomm = ctypes.c_void_p(group.handle())
+            self.pynccl.comm = newcomm
+            active_src = src
+
+            if src is not None:
+                assert src in group.ranks(), "src rank not in group"
+                # convert src rank id in default world to newcomm
+                active_src = group.ranks().index(src)
+                self.pynccl.rank = group.ranks().index(self.rank)
+
+        try:
+            yield active_src
+        finally:
+            if group:
+                self.pynccl.comm = self.comm
+                if src is not None:
+                    self.pynccl.rank = self.rank
+
     def init_process_group(
         self,
         host: str,
@@ -134,14 +157,14 @@ class DistributedNccl(Distributed):
 
     def destroy_process_group(
         self,
-        group: int | None = None,
+        group: CommGroup | None = None,
     ):
         assert self.initialized, "not initialized"
 
-        if group in self.sub_groups:
-            newcomm = ctypes.c_void_p(group)
+        if group.handle() in self.sub_groups:
+            newcomm = ctypes.c_void_p(group.handle())
             self.pynccl.destroy_comm(newcomm)
-            del self.sub_groups[group]
+            del self.sub_groups[group.handle()]
             return
 
         self.pynccl.destroy_comm()
@@ -152,81 +175,55 @@ class DistributedNccl(Distributed):
     def is_initialized(self) -> bool:
         return self.initialized
 
-    def all_gather_object(self, object_list: list[Any], obj: Any, group: int | None = None):
+    def all_gather_object(self, object_list: list[Any], obj: Any, group: CommGroup | None = None):
         assert self.initialized, "not initialized"
 
-        if group:
-            assert group in self.sub_groups, "invalid sub_group"
-            newcomm = ctypes.c_void_p(group)
-            self.pynccl.comm = newcomm
-
-        _common_all_gather_object(self.pynccl, self.device, self.world_size, object_list, obj)
-        current_stream().synchronize()
-
-        if group:
-            self.pynccl.comm = self.comm
+        with self._use_group(group):
+            _common_all_gather_object(self.pynccl, self.device, self.world_size, object_list, obj)
+            current_stream().synchronize()
 
     def all_reduce(
-        self, tensor: torch.Tensor, op: ReduceOp = ReduceOp.SUM, group: int | None = None
+        self,
+        tensor: torch.Tensor,
+        op: ReduceOp.RedOpType = ReduceOp.SUM,
+        group: CommGroup | None = None,
+        **kwargs,
     ):
         assert self.initialized, "not initialized"
 
-        if group:
-            assert group in self.sub_groups, "invalid sub_group"
-            newcomm = ctypes.c_void_p(group)
-            self.pynccl.comm = newcomm
+        with self._use_group(group):
+            out_tensor = self.pynccl.all_reduce(in_tensor=tensor, op=op)
+            current_stream().synchronize()
+            tensor.copy_(out_tensor)
 
-        out_tensor = self.pynccl.all_reduce(in_tensor=tensor, op=op)
-        current_stream().synchronize()
-        tensor.copy_(out_tensor)
-
-        if group:
-            self.pynccl.comm = self.comm
-
-    def broadcast(self, tensor: torch.Tensor, src: int | None = None, group: int | None = None):
+    def broadcast(
+        self, tensor: torch.Tensor, src: int | None = None, group: CommGroup | None = None, **kwargs
+    ):
         assert self.initialized, "not initialized"
 
-        if group:
-            assert group in self.sub_groups, "invalid sub_group"
-            assert src in self.sub_groups[group], "src rank not in group"
-            newcomm = ctypes.c_void_p(group)
-            self.pynccl.comm = newcomm
-            # convert src rank id in default world to newcomm
-            src = self.sub_groups[group].index(src)
-            self.pynccl.rank = self.sub_groups[group].index(self.rank)
+        with self._use_group(group, src) as local_src:
+            self.pynccl.broadcast(tensor, local_src)
+            current_stream().synchronize()
 
-        self.pynccl.broadcast(tensor, src)
-        current_stream().synchronize()
-
-        if group:
-            self.pynccl.comm = self.comm
-            self.pynccl.rank = self.rank
-
-    def barrier(self, group: int | None = None):
+    def barrier(self, group: CommGroup | None = None, **kwargs):
         assert self.initialized, "not initialized"
 
-        if group:
-            assert group in self.sub_groups, "invalid sub_group"
-            newcomm = ctypes.c_void_p(group)
-            self.pynccl.comm = newcomm
+        with self._use_group(group):
+            data = torch.zeros(1, device=self.device)
+            self.pynccl.all_reduce(data)
+            current_stream().synchronize()
 
-        data = torch.zeros(1, device=self.device)
-        self.pynccl.all_reduce(data)
-        current_stream().synchronize()
-
-        if group:
-            self.pynccl.comm = self.comm
-
-    def new_group(self, ranks: list[int]) -> int:
+    def new_group(self, ranks: list[int], **kwargs) -> CommGroup:
         assert self.initialized, "not initialized"
 
         # ranks is None or []
         if not ranks:
             ranks = list(range(self.world_size))
+        else:
+            ranks.sort()
 
         newcomm = self.pynccl.create_newcomm(ranks)
-        value = 0
         if newcomm:
-            value = newcomm.value
-            self.sub_groups[value] = ranks
-        return value
+            group = CommGroup(newcomm.value, ranks)
+            self.sub_groups[newcomm.value] = group
+        return group

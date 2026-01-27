@@ -3,10 +3,31 @@ import io
 import pickle
 from abc import ABC, abstractmethod
 from datetime import timedelta
-from typing import Any
+from typing import Any, Protocol
 
 import torch
 import torch.distributed as torch_dist
+
+
+class CommunicatorProtocol(Protocol):
+    def all_gather(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
+
+
+class CommGroup:
+    def __init__(self, comm_handle: int, ranks: list[int]):
+        self._comm = comm_handle
+        self.ranks = ranks
+
+    @property
+    def handle(self) -> int:
+        return self._comm
+
+    @property
+    def ranks(self) -> list[int]:
+        return self.ranks
+
+
+DistributedProcessGroup = torch_dist.ProcessGroup | CommGroup
 
 
 class Distributed(ABC):
@@ -24,7 +45,7 @@ class Distributed(ABC):
     @abstractmethod
     def destroy_process_group(
         self,
-        group: torch_dist.ProcessGroup | int | None = None,
+        group: DistributedProcessGroup | None = None,
     ):
         raise NotImplementedError
 
@@ -37,7 +58,7 @@ class Distributed(ABC):
         self,
         object_list: list[Any],
         obj: Any,
-        group: torch_dist.ProcessGroup | int | None = None,
+        group: DistributedProcessGroup | None = None,
     ):
         raise NotImplementedError
 
@@ -45,8 +66,9 @@ class Distributed(ABC):
     def all_reduce(
         self,
         tensor: torch.Tensor,
-        op: torch_dist.ReduceOp,
-        group: torch_dist.ProcessGroup | int | None = None,
+        op: torch_dist.ReduceOp.RedOpType,
+        group: DistributedProcessGroup | None = None,
+        **kwargs,
     ):
         raise NotImplementedError
 
@@ -55,14 +77,16 @@ class Distributed(ABC):
         self,
         tensor: torch.Tensor,
         src: int,
-        group: torch_dist.ProcessGroup | int | None = None,
+        group: DistributedProcessGroup | None = None,
+        **kwargs,
     ):
         raise NotImplementedError
 
     @abstractmethod
     def barrier(
         self,
-        group: torch_dist.ProcessGroup | int | None = None,
+        group: DistributedProcessGroup | None = None,
+        **kwargs,
     ):
         raise NotImplementedError
 
@@ -70,12 +94,72 @@ class Distributed(ABC):
     def new_group(
         self,
         ranks: list[int],
+        **kwargs,
     ):
         raise NotImplementedError
 
 
+class TorchBackend(Distributed):
+    def __init__(self, backend_type: str):
+        self.backend_type = backend_type
+
+    def init_process_group(
+        self,
+        host: str,
+        port: int,
+        rank: int,
+        world_size: int,
+        timeout: timedelta,
+    ):
+        store = torch.distributed.TCPStore(
+            host, port, world_size, timeout=timeout, is_master=(rank == 0)
+        )
+        torch.distributed.init_process_group(
+            backend=self.backend_type,
+            world_size=world_size,
+            rank=rank,
+            timeout=timeout,
+            store=store,
+        )
+
+    def destroy_process_group(self, group: DistributedProcessGroup | None = None):
+        torch_dist.destroy_process_group(group)
+
+    def is_initialized(self) -> bool:
+        return torch_dist.is_initialized()
+
+    def all_gather_object(
+        self, object_list: list[Any], obj: Any, group: DistributedProcessGroup | None = None
+    ):
+        torch_dist.all_gather_object(object_list, obj, group)
+
+    def all_reduce(
+        self,
+        tensor: torch.Tensor,
+        op: torch_dist.ReduceOp.RedOpType = torch_dist.ReduceOp.SUM,
+        group: DistributedProcessGroup | None = None,
+        **kwargs,
+    ):
+        torch_dist.all_reduce(tensor, op, group, **kwargs)
+
+    def broadcast(
+        self,
+        tensor: torch.Tensor,
+        src: int = 0,
+        group: DistributedProcessGroup | None = None,
+        **kwargs,
+    ):
+        torch_dist.broadcast(tensor, src, group, **kwargs)
+
+    def barrier(self, group: DistributedProcessGroup | None = None, **kwargs):
+        torch_dist.barrier(group, **kwargs)
+
+    def new_group(self, ranks: list[int], **kwargs) -> DistributedProcessGroup | None:
+        return torch_dist.new_group(ranks, **kwargs)
+
+
 # specific device instance
-_BACKEND_INSTANCE = None
+_BACKEND_INSTANCE: Distributed = TorchBackend(backend_type="nccl")
 
 _pickler = pickle.Pickler
 _unpickler = pickle.Unpickler
@@ -112,7 +196,7 @@ def _flatten_for_scatter_gather(
 
 
 def _common_all_gather_object(
-    comm: Any,
+    comm: CommunicatorProtocol,
     device: torch.device,
     world_size: int,
     object_list: list[Any],
@@ -144,83 +228,67 @@ def init_process_group(
     port: int,
     rank: int,
     world_size: int,
+    custom_dist: bool,
     backend: str,
     timeout: timedelta = timedelta(seconds=300),
 ):
     global _BACKEND_INSTANCE
 
-    mapping = {
-        "nccl": ".nccl.DistributedNccl",
-        "hccl": ".hccl.DistributedHccl",
-    }
+    if not custom_dist:
+        _BACKEND_INSTANCE = TorchBackend(backend_type=backend)
+    else:
+        mapping = {
+            "nccl": ".nccl.DistributedNccl",
+            "hccl": ".hccl.DistributedHccl",
+        }
+        if backend not in mapping:
+            raise ValueError(f"Unsupported custom backend: {backend}")
 
-    if backend not in mapping:
-        raise ValueError(f"Unsupported device type: {backend}")
+        module_path, class_name = mapping[backend].rsplit(".", 1)
+        module = importlib.import_module(module_path, "checkpoint_engine.distributed")
+        backend_class = getattr(module, class_name)
+        _BACKEND_INSTANCE = backend_class()
 
-    module_path, class_name = mapping[backend].rsplit(".", 1)
-    module = importlib.import_module(module_path, "checkpoint_engine.distributed")
-    backend_class = getattr(module, class_name)
-
-    _BACKEND_INSTANCE = backend_class()
     _BACKEND_INSTANCE.init_process_group(host, port, rank, world_size, timeout)
 
 
-def destroy_process_group(group: torch_dist.ProcessGroup | int | None = None):
-    if _BACKEND_INSTANCE is None:
-        torch_dist.destroy_process_group(group)
-        return
+def destroy_process_group(group: DistributedProcessGroup | None = None):
     _BACKEND_INSTANCE.destroy_process_group(group)
 
 
 def is_initialized() -> bool:
-    if _BACKEND_INSTANCE is None:
-        return torch_dist.is_initialized()
     return _BACKEND_INSTANCE.is_initialized()
 
 
 def all_gather_object(
     object_list: list[Any],
     obj: Any,
-    group: torch_dist.ProcessGroup | int | None = None,
+    group: DistributedProcessGroup | None = None,
 ):
-    if _BACKEND_INSTANCE is None:
-        torch_dist.all_gather_object(object_list, obj, group)
-        return
     _BACKEND_INSTANCE.all_gather_object(object_list, obj, group)
 
 
 def all_reduce(
     tensor: torch.Tensor,
-    op: torch_dist.ReduceOp = torch_dist.ReduceOp.SUM,
-    group: torch_dist.ProcessGroup | int | None = None,
+    op: torch_dist.ReduceOp.RedOpType = torch_dist.ReduceOp.SUM,
+    group: DistributedProcessGroup | None = None,
     **kwargs,
 ):
-    if _BACKEND_INSTANCE is None:
-        torch_dist.all_reduce(tensor, op, group, **kwargs)
-        return
-    _BACKEND_INSTANCE.all_reduce(tensor, op, group)
+    _BACKEND_INSTANCE.all_reduce(tensor, op, group, **kwargs)
 
 
 def broadcast(
     tensor: torch.Tensor,
     src: int = 0,
-    group: torch_dist.ProcessGroup | int | None = None,
+    group: DistributedProcessGroup | None = None,
     **kwargs,
 ):
-    if _BACKEND_INSTANCE is None:
-        torch_dist.broadcast(tensor, src, group, **kwargs)
-        return
-    _BACKEND_INSTANCE.broadcast(tensor, src, group)
+    _BACKEND_INSTANCE.broadcast(tensor, src, group, **kwargs)
 
 
-def barrier(group: torch_dist.ProcessGroup | int | None = None, **kwargs):
-    if _BACKEND_INSTANCE is None:
-        torch_dist.barrier(group, **kwargs)
-        return
-    _BACKEND_INSTANCE.barrier(group)
+def barrier(group: DistributedProcessGroup | None = None, **kwargs):
+    _BACKEND_INSTANCE.barrier(group, **kwargs)
 
 
-def new_group(ranks: list[int], **kwargs) -> torch_dist.ProcessGroup | int | None:
-    if _BACKEND_INSTANCE is None:
-        return torch_dist.new_group(ranks, **kwargs)
-    return _BACKEND_INSTANCE.new_group(ranks)
+def new_group(ranks: list[int], **kwargs) -> DistributedProcessGroup | None:
+    return _BACKEND_INSTANCE.new_group(ranks, **kwargs)

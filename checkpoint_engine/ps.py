@@ -493,30 +493,15 @@ class ParameterServer:
         """
         master_addr = master_addr or os.getenv("MASTER_ADDR")
         assert master_addr, "master_addr is required"
-        if not self._custom_dist:
-            store = torch.distributed.TCPStore(
-                master_addr,
-                _get_master_port(master_port),
-                self._world_size,
-                timeout=timeout,
-                is_master=self._rank == 0,
-            )
-            torch.distributed.init_process_group(
-                backend=self.device_manager.backend,
-                world_size=self._world_size,
-                rank=self._rank,
-                timeout=timeout,
-                store=store,
-            )
-        else:
-            dist.init_process_group(
-                host=master_addr,
-                port=_get_master_port(master_port),
-                rank=self._rank,
-                world_size=self._world_size,
-                backend=self.device_manager.backend,
-                timeout=timeout,
-            )
+        dist.init_process_group(
+            host=master_addr,
+            port=_get_master_port(master_port),
+            rank=self._rank,
+            world_size=self._world_size,
+            custom_dist=self._custom_dist,
+            backend=self.device_manager.backend,
+            timeout=timeout,
+        )
         logger.info(f"[rank{self._rank}] init process group successfully.")
 
     def store_based_barrier(
