@@ -16,7 +16,7 @@ class CommunicatorProtocol(Protocol):
 class CommGroup:
     def __init__(self, comm_handle: int, ranks: list[int]):
         self._comm = comm_handle
-        self.ranks = ranks
+        self._ranks = ranks
 
     @property
     def handle(self) -> int:
@@ -24,7 +24,7 @@ class CommGroup:
 
     @property
     def ranks(self) -> list[int]:
-        return self.ranks
+        return self._ranks
 
 
 DistributedProcessGroup = torch_dist.ProcessGroup | CommGroup
@@ -39,6 +39,7 @@ class Distributed(ABC):
         rank: int,
         world_size: int,
         timeout: timedelta,
+        **kwargs,
     ):
         raise NotImplementedError
 
@@ -100,9 +101,6 @@ class Distributed(ABC):
 
 
 class TorchBackend(Distributed):
-    def __init__(self, backend_type: str):
-        self.backend_type = backend_type
-
     def init_process_group(
         self,
         host: str,
@@ -110,12 +108,14 @@ class TorchBackend(Distributed):
         rank: int,
         world_size: int,
         timeout: timedelta,
+        **kwargs,
     ):
+        backend = kwargs.get("backend", "nccl")
         store = torch.distributed.TCPStore(
             host, port, world_size, timeout=timeout, is_master=(rank == 0)
         )
         torch.distributed.init_process_group(
-            backend=self.backend_type,
+            backend=backend,
             world_size=world_size,
             rank=rank,
             timeout=timeout,
@@ -159,7 +159,7 @@ class TorchBackend(Distributed):
 
 
 # specific device instance
-_BACKEND_INSTANCE: Distributed = TorchBackend(backend_type="nccl")
+_BACKEND_INSTANCE: Distributed = TorchBackend()
 
 _pickler = pickle.Pickler
 _unpickler = pickle.Unpickler
@@ -223,33 +223,34 @@ def _common_all_gather_object(
         object_list[i] = _tensor_to_object(tensor, tensor_size)
 
 
+def use_backend(backend: str | None):
+    global _BACKEND_INSTANCE
+
+    if not backend:
+        return
+
+    mapping = {
+        "vllm_nccl": ".nccl.DistributedNccl",
+        "vllm_hccl": ".hccl.DistributedHccl",
+    }
+    if backend not in mapping:
+        raise ValueError(f"Unsupported custom backend: {backend}")
+
+    module_path, class_name = mapping[backend].rsplit(".", 1)
+    module = importlib.import_module(module_path, "checkpoint_engine.distributed")
+    backend_class = getattr(module, class_name)
+    _BACKEND_INSTANCE = backend_class()
+
+
 def init_process_group(
     host: str,
     port: int,
     rank: int,
     world_size: int,
-    custom_dist: bool,
-    backend: str,
     timeout: timedelta = timedelta(seconds=300),
+    **kwargs,
 ):
-    global _BACKEND_INSTANCE
-
-    if not custom_dist:
-        _BACKEND_INSTANCE = TorchBackend(backend_type=backend)
-    else:
-        mapping = {
-            "nccl": ".nccl.DistributedNccl",
-            "hccl": ".hccl.DistributedHccl",
-        }
-        if backend not in mapping:
-            raise ValueError(f"Unsupported custom backend: {backend}")
-
-        module_path, class_name = mapping[backend].rsplit(".", 1)
-        module = importlib.import_module(module_path, "checkpoint_engine.distributed")
-        backend_class = getattr(module, class_name)
-        _BACKEND_INSTANCE = backend_class()
-
-    _BACKEND_INSTANCE.init_process_group(host, port, rank, world_size, timeout)
+    _BACKEND_INSTANCE.init_process_group(host, port, rank, world_size, timeout, **kwargs)
 
 
 def destroy_process_group(group: DistributedProcessGroup | None = None):

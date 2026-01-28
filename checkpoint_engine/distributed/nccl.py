@@ -111,17 +111,17 @@ class DistributedNccl(Distributed):
 
     @contextmanager
     def _use_group(self, group: CommGroup | None, src: int | None = None):
+        active_src = src
         if group:
-            assert group.handle() in self.sub_groups, "invalid sub_group"
-            newcomm = ctypes.c_void_p(group.handle())
+            assert group.handle in self.sub_groups, "invalid sub_group"
+            newcomm = ctypes.c_void_p(group.handle)
             self.pynccl.comm = newcomm
-            active_src = src
 
             if src is not None:
-                assert src in group.ranks(), "src rank not in group"
+                assert src in group.ranks, "src rank not in group"
                 # convert src rank id in default world to newcomm
-                active_src = group.ranks().index(src)
-                self.pynccl.rank = group.ranks().index(self.rank)
+                active_src = group.ranks.index(src)
+                self.pynccl.rank = group.ranks.index(self.rank)
 
         try:
             yield active_src
@@ -138,6 +138,7 @@ class DistributedNccl(Distributed):
         rank: int,
         world_size: int,
         timeout: timedelta = timedelta(seconds=300),
+        **kwargs,
     ):
         assert not self.initialized, "already initialized"
 
@@ -161,10 +162,10 @@ class DistributedNccl(Distributed):
     ):
         assert self.initialized, "not initialized"
 
-        if group.handle() in self.sub_groups:
-            newcomm = ctypes.c_void_p(group.handle())
+        if group and group.handle in self.sub_groups:
+            newcomm = ctypes.c_void_p(group.handle)
             self.pynccl.destroy_comm(newcomm)
-            del self.sub_groups[group.handle()]
+            del self.sub_groups[group.handle]
             return
 
         self.pynccl.destroy_comm()

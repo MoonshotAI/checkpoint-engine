@@ -159,13 +159,14 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-name", type=str, default="my-checkpoint-iter-0")
     parser.add_argument("--update-method", type=str, default="broadcast")
     parser.add_argument("--uds", type=str, default=None)
-    parser.add_argument("--custom-dist", action="store_true")
+    parser.add_argument("--custom-dist", type=str, default=None)
     args = parser.parse_args()
     rank = int(os.getenv("RANK"))
     world_size = int(os.getenv("WORLD_SIZE"))
 
     req_func = req_inference(args.endpoint, args.inference_parallel_size, args.uds)
-    ps = ParameterServer(auto_pg=True, custom_dist=args.custom_dist)
+    dist.use_backend(args.custom_dist)
+    ps = ParameterServer(auto_pg=True)
     if args.load_metas_file:
         join(
             ps,

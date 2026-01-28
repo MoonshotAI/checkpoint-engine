@@ -176,7 +176,6 @@ class ParameterServer:
         auto_pg: bool = True,
         gpu_count: int | None = None,
         mem_fraction: float | None = None,
-        custom_dist: bool = False,
     ):
         """
         Initialize the parameter server. env RANK, WORLD_SIZE and MASTER_ADDR must be set.
@@ -197,7 +196,6 @@ class ParameterServer:
         self._local_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._remote_rdma_devices: dict[str, set[int]] = defaultdict(set)
         self._mem_fraction = mem_fraction or float(os.getenv("PS_MEM_FRACTION", "0.9"))
-        self._custom_dist = custom_dist
 
         assert self._rank is not None and self._rank >= 0, self._rank
         assert self._world_size and self._world_size > 0, self._world_size
@@ -498,9 +496,8 @@ class ParameterServer:
             port=_get_master_port(master_port),
             rank=self._rank,
             world_size=self._world_size,
-            custom_dist=self._custom_dist,
-            backend=self.device_manager.backend,
             timeout=timeout,
+            backend=self.device_manager.backend,
         )
         logger.info(f"[rank{self._rank}] init process group successfully.")
 
@@ -593,7 +590,7 @@ class ParameterServer:
 
     def _detect_bucket_size(
         self,
-        ranks_group: torch.distributed.ProcessGroup | int | None,
+        ranks_group: dist.DistributedProcessGroup | None,
         *,
         disable_h2d_buffer: bool = False,
     ) -> tuple[int, bool]:
@@ -714,7 +711,7 @@ class ParameterServer:
         self,
         checkpoint_name: str,
         req_func: Callable[[list[tuple[str, str]]], None],
-        ranks_group: torch.distributed.ProcessGroup | int | None,
+        ranks_group: dist.DistributedProcessGroup | None,
         ranks: list[int] | None = None,
     ):
         assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"

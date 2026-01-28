@@ -208,25 +208,25 @@ class DistributedHccl(Distributed):
 
     @contextmanager
     def _use_group(self, group: CommGroup | None, src: int | None = None):
+        active_src = src
         if group:
-            assert group.handle() in self.sub_groups, "invalid sub_group"
-            newcomm = ctypes.c_void_p(group.handle())
-            self.pynccl.comm = newcomm
-            active_src = src
+            assert group.handle in self.sub_groups, "invalid sub_group"
+            newcomm = ctypes.c_void_p(group.handle)
+            self.pyhccl.comm = newcomm
 
             if src is not None:
-                assert src in group.ranks(), "src rank not in group"
+                assert src in group.ranks, "src rank not in group"
                 # convert src rank id in default world to newcomm
-                active_src = group.ranks().index(src)
-                self.pynccl.rank = group.ranks().index(self.rank)
+                active_src = group.ranks.index(src)
+                self.pyhccl.rank = group.ranks.index(self.rank)
 
         try:
             yield active_src
         finally:
             if group:
-                self.pynccl.comm = self.comm
+                self.pyhccl.comm = self.comm
                 if src is not None:
-                    self.pynccl.rank = self.rank
+                    self.pyhccl.rank = self.rank
 
     def init_process_group(
         self,
@@ -235,6 +235,7 @@ class DistributedHccl(Distributed):
         rank: int,
         world_size: int,
         timeout: timedelta = timedelta(seconds=300),
+        **kwargs,
     ):
         assert not self.initialized, "already initialized"
 
@@ -257,10 +258,10 @@ class DistributedHccl(Distributed):
     ):
         assert self.initialized, "not initialized"
 
-        if group in self.sub_groups:
-            subcomm = ctypes.c_void_p(group)
+        if group and group.handle in self.sub_groups:
+            subcomm = ctypes.c_void_p(group.handle)
             self.pyhccl.destroy_comm(subcomm)
-            del self.sub_groups[group]
+            del self.sub_groups[group.handle]
             return
 
         self.pyhccl.destroy_comm()
@@ -297,7 +298,7 @@ class DistributedHccl(Distributed):
     ):
         assert self.initialized, "not initialized"
 
-        with self._use_group(group) as local_rank:
+        with self._use_group(group, src) as local_rank:
             self.pyhccl.broadcast(tensor, local_rank)
             current_stream().synchronize()
 
@@ -318,8 +319,11 @@ class DistributedHccl(Distributed):
         else:
             ranks.sort()
 
-        newcomm = self.pynccl.create_newcomm(ranks)
-        if newcomm:
-            group = CommGroup(newcomm.value, ranks)
-            self.sub_groups[newcomm.value] = group
+        if self.rank not in ranks:
+            return
+
+        subcomm = self.pyhccl.create_subcomm(ranks)
+        if subcomm:
+            group = CommGroup(subcomm.value, ranks)
+            self.sub_groups[subcomm.value] = group
         return group
