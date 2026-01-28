@@ -195,7 +195,7 @@ class DistributedHccl(Distributed):
     def __init__(self):
         self.pg: StatelessProcessGroup = None
         self.pyhccl: PyHcclCommunicatorEx = None
-        self.sub_groups: dict[int, list[int]] = {}
+        self.sub_groups: dict[int, CommGroup] = {}
         self.comm: hcclComm_t = None
 
         self.host: str = None
