@@ -10,6 +10,9 @@ import zmq
 from checkpoint_engine.device_utils import DeviceManager, npu_generate_uuid
 
 
+_WEIGHTS_TYPE = list[tuple[str, torch.Tensor]]
+
+
 def _rebuild_ipc(handle: tuple[Callable, tuple], device_id: int | None = None) -> torch.Tensor:
     func, args = handle
     list_args = list(args)
@@ -29,11 +32,9 @@ class FlattenedTensorMetadata(TypedDict):
     offset: int
 
 
-def _extract_weights(
-    payload: list[FlattenedTensorMetadata], buffer: torch.Tensor
-) -> list[tuple[str, torch.Tensor]]:
+def _extract_weights(payload: list[FlattenedTensorMetadata], buffer: torch.Tensor) -> _WEIGHTS_TYPE:
     assert buffer is not None
-    weights: list[tuple[str, torch.Tensor]] = []
+    weights: _WEIGHTS_TYPE = []
     for item in payload:
         shape = item["shape"]
         if isinstance(shape, list | tuple):
@@ -166,12 +167,31 @@ class VllmColocateWorkerExtension:
             self.device = torch.device(f"npu:{self.local_rank}")
         assert self.device is not None
 
+        def _load_weights(weights: _WEIGHTS_TYPE):
+            # Load main model weights
+            self.model_runner.model.load_weights(weights)
+            # Load drafter model weights if MTP/speculative decoding is enabled
+            if (
+                getattr(self.model_runner, "drafter", None) is not None
+                and getattr(self.model_runner.drafter, "model", None) is not None
+            ):
+                self.model_runner.drafter.model.load_weights(weights=weights)
+
+        def _post_hook():
+            process_weights_after_loading(self.model_runner.model, self.model_config, self.device)
+            # Also trigger drafter model's post processing if MTP is enabled
+            if (
+                getattr(self.model_runner, "drafter", None) is not None
+                and getattr(self.model_runner.drafter, "model", None) is not None
+            ):
+                process_weights_after_loading(
+                    self.model_runner.drafter.model, self.model_config, self.device
+                )
+
         update_weights_from_ipc(
             self._zmq_ctx,
             zmq_handles[self._device_uuid],
             device_id=self.device.index,
-            run=self.model_runner.model.load_weights,
-            post_hook=lambda: process_weights_after_loading(
-                self.model_runner.model, self.model_config, self.device
-            ),
+            run=_load_weights,
+            post_hook=_post_hook,
         )
