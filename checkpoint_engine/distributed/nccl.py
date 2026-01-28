@@ -223,6 +223,7 @@ class DistributedNccl(Distributed):
         else:
             ranks.sort()
 
+        group: CommGroup = None
         newcomm = self.pynccl.create_newcomm(ranks)
         if newcomm:
             group = CommGroup(newcomm.value, ranks)
