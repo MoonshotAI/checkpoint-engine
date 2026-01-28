@@ -171,16 +171,18 @@ class VllmColocateWorkerExtension:
             # Load main model weights
             self.model_runner.model.load_weights(weights)
             # Load drafter model weights if MTP/speculative decoding is enabled
-            if hasattr(self.model_runner, "drafter") and hasattr(
-                self.model_runner.drafter, "model"
+            if (
+                getattr(self.model_runner, "drafter", None) is not None
+                and getattr(self.model_runner.drafter, "model", None) is not None
             ):
                 self.model_runner.drafter.model.load_weights(weights=weights)
 
         def _post_hook():
             process_weights_after_loading(self.model_runner.model, self.model_config, self.device)
             # Also trigger drafter model's post processing if MTP is enabled
-            if hasattr(self.model_runner, "drafter") and hasattr(
-                self.model_runner.drafter, "model"
+            if (
+                getattr(self.model_runner, "drafter", None) is not None
+                and getattr(self.model_runner.drafter, "model", None) is not None
             ):
                 process_weights_after_loading(
                     self.model_runner.drafter.model, self.model_config, self.device
