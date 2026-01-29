@@ -23,6 +23,8 @@ def generate_dummy_checkpoint() -> dict[str, torch.Tensor]:
 def test_register_pin_memory():
     os.environ["RANK"] = "0"
     os.environ["WORLD_SIZE"] = "1"
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "25400"
     ps = ParameterServer()
     checkpoint1 = generate_dummy_checkpoint()
     checkpoint_shared1 = generate_dummy_checkpoint()
