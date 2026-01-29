@@ -7,11 +7,12 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
+import torch.distributed
 import zmq
 from loguru import logger
 from torch.multiprocessing.reductions import reduce_tensor
 
+import checkpoint_engine.distributed as dist
 from checkpoint_engine.data_types import (
     BucketRange,
     DataToGather,
@@ -500,24 +501,18 @@ class ParameterServer:
         """
         master_addr = master_addr or os.getenv("MASTER_ADDR")
         assert master_addr, "master_addr is required"
-        store = dist.TCPStore(
-            master_addr,
-            _get_master_port(master_port),
-            self._world_size,
-            timeout=timeout,
-            is_master=self._rank == 0,
-        )
         dist.init_process_group(
-            backend=self.device_manager.backend,
-            world_size=self._world_size,
+            host=master_addr,
+            port=_get_master_port(master_port),
             rank=self._rank,
+            world_size=self._world_size,
             timeout=timeout,
-            store=store,
+            backend=self.device_manager.backend,
         )
         logger.info(f"[rank{self._rank}] init process group successfully.")
 
     def store_based_barrier(
-        self, store: dist.TCPStore, timeout: timedelta = timedelta(minutes=5)
+        self, store: torch.distributed.TCPStore, timeout: timedelta = timedelta(minutes=5)
     ) -> None:
         """
         Perform a store-based barrier synchronization across all ranks.
@@ -529,7 +524,7 @@ class ParameterServer:
         Args:
             store: The TCPStore instance to use for synchronization.
         """
-        dist.distributed_c10d._store_based_barrier(
+        torch.distributed.distributed_c10d._store_based_barrier(
             rank=self._rank,
             store=store,
             group_name="parameter_server_barrier",
@@ -568,22 +563,19 @@ class ParameterServer:
         try:
             master_addr = os.getenv("MASTER_ADDR") or master_addr
             assert master_addr, "master_addr is required"
-            if self._auto_pg:
-                if not dist.is_initialized():
-                    self.init_process_group(
-                        timeout=timeout, master_addr=master_addr, master_port=master_port
-                    )
-                manager_store = dist.distributed_c10d._get_default_store()
-            else:
-                # HACK: MASTER_PORT+2 for barrier store if master_port is not provided, _get_master_port() returns MASTER_PORT+1
-                # If master_port is provided, use master_port+1 for barrier store
-                manager_store = dist.TCPStore(
-                    master_addr,
-                    _get_master_port(master_port) + 1,
-                    self._world_size,
-                    timeout=timeout,
-                    is_master=self._rank == 0,
+            if self._auto_pg and not dist.is_initialized():
+                self.init_process_group(
+                    timeout=timeout, master_addr=master_addr, master_port=master_port
                 )
+            # HACK: MASTER_PORT+2 for barrier store if master_port is not provided, _get_master_port() returns MASTER_PORT+1
+            # If master_port is provided, use master_port+1 for barrier store
+            manager_store = torch.distributed.TCPStore(
+                master_addr,
+                _get_master_port(master_port) + 1,
+                self._world_size,
+                timeout=timeout,
+                is_master=self._rank == 0,
+            )
             # if ranks is None or [], it will use fully broadcast to update to all ranks
             ranks_group = dist.new_group(ranks) if ranks else None
             self._update_per_bucket(checkpoint_name, req_func, ranks_group, ranks)
@@ -598,6 +590,7 @@ class ParameterServer:
                 dist.destroy_process_group(ranks_group)
             if self._auto_pg and dist.is_initialized():
                 dist.destroy_process_group()
+            del manager_store
             self.device_manager.device_module.empty_cache()
             logger.info(
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} done. "
@@ -616,7 +609,10 @@ class ParameterServer:
         return socket, socket_paths
 
     def _detect_bucket_size(
-        self, ranks_group: dist.ProcessGroup | None, *, disable_h2d_buffer: bool = False
+        self,
+        ranks_group: dist.DistributedProcessGroup | None,
+        *,
+        disable_h2d_buffer: bool = False,
     ) -> tuple[int, bool]:
         GiB = 1 << 30  # noqa: N806
         # auto detect bucket size
@@ -633,7 +629,7 @@ class ParameterServer:
             dtype=torch.int64,
             device=self.device_manager.device_type,
         )
-        dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=ranks_group)
+        dist.all_reduce(tensor, op=torch.distributed.ReduceOp.MIN, group=ranks_group)
         tensor = tensor.cpu()
         free_bytes, self._zmq_addr_counter = tensor[0].item(), -tensor[1].item()
         max_tensor_bytes = 0
@@ -735,7 +731,7 @@ class ParameterServer:
         self,
         checkpoint_name: str,
         req_func: Callable[[list[tuple[str, str]]], None],
-        ranks_group: dist.ProcessGroup | None,
+        ranks_group: dist.DistributedProcessGroup | None,
         ranks: list[int] | None = None,
     ):
         assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"
@@ -854,7 +850,7 @@ class ParameterServer:
                             f"[rank{self._rank}] receive error response from rank {receiver_rank} for bucket {gidx} in checkpoint {checkpoint_name}: {msg}"
                         )
                         ret_code.fill_(1)
-                    dist.all_reduce(ret_code, op=dist.ReduceOp.SUM, group=ranks_group)
+                    dist.all_reduce(ret_code, op=torch.distributed.ReduceOp.SUM, group=ranks_group)
                     self.device_manager.device_module.synchronize()
                     if ret_code.item() != 0:
                         # quit early if any rank failed
