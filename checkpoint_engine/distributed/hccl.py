@@ -310,7 +310,7 @@ class DistributedHccl(Distributed):
             self.pyhccl.all_reduce(data)
             current_stream().synchronize()
 
-    def new_group(self, ranks: list[int], **kwargs) -> CommGroup:
+    def new_group(self, ranks: list[int], **kwargs) -> CommGroup | None:
         assert self.initialized, "not initialized"
 
         # ranks is None or []
@@ -319,8 +319,9 @@ class DistributedHccl(Distributed):
         else:
             ranks.sort()
 
+        group: CommGroup = None
         if self.rank not in ranks:
-            return
+            return group
 
         subcomm = self.pyhccl.create_subcomm(ranks)
         if subcomm:

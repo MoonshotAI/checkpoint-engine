@@ -553,22 +553,19 @@ class ParameterServer:
         try:
             master_addr = os.getenv("MASTER_ADDR") or master_addr
             assert master_addr, "master_addr is required"
-            if self._auto_pg:
-                if not dist.is_initialized():
-                    self.init_process_group(
-                        timeout=timeout, master_addr=master_addr, master_port=master_port
-                    )
-                manager_store = torch.distributed.distributed_c10d._get_default_store()
-            else:
-                # HACK: MASTER_PORT+2 for barrier store if master_port is not provided, _get_master_port() returns MASTER_PORT+1
-                # If master_port is provided, use master_port+1 for barrier store
-                manager_store = torch.distributed.TCPStore(
-                    master_addr,
-                    _get_master_port(master_port) + 1,
-                    self._world_size,
-                    timeout=timeout,
-                    is_master=self._rank == 0,
+            if self._auto_pg and not dist.is_initialized():
+                self.init_process_group(
+                    timeout=timeout, master_addr=master_addr, master_port=master_port
                 )
+            # HACK: MASTER_PORT+2 for barrier store if master_port is not provided, _get_master_port() returns MASTER_PORT+1
+            # If master_port is provided, use master_port+1 for barrier store
+            manager_store = torch.distributed.TCPStore(
+                master_addr,
+                _get_master_port(master_port) + 1,
+                self._world_size,
+                timeout=timeout,
+                is_master=self._rank == 0,
+            )
             # if ranks is None or [], it will use fully broadcast to update to all ranks
             ranks_group = dist.new_group(ranks) if ranks else None
             self._update_per_bucket(checkpoint_name, req_func, ranks_group, ranks)
@@ -583,6 +580,7 @@ class ParameterServer:
                 dist.destroy_process_group(ranks_group)
             if self._auto_pg and dist.is_initialized():
                 dist.destroy_process_group()
+            del manager_store
             self.device_manager.device_module.empty_cache()
             logger.info(
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} done. "

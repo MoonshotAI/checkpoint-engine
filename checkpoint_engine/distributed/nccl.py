@@ -214,7 +214,7 @@ class DistributedNccl(Distributed):
             self.pynccl.all_reduce(data)
             current_stream().synchronize()
 
-    def new_group(self, ranks: list[int], **kwargs) -> CommGroup:
+    def new_group(self, ranks: list[int], **kwargs) -> CommGroup | None:
         assert self.initialized, "not initialized"
 
         # ranks is None or []
