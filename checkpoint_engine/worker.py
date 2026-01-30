@@ -71,9 +71,23 @@ def update_weights_from_ipc(
         socket.recv()  # wait for ack
         raise
     try:
+        released = False
         while True:
             payload: list[FlattenedTensorMetadata] | Exception | None = socket.recv_pyobj()
             if payload is None:  # done signal
+                # TODO: refine stm logic, wrap all messages instead of None and Exception
+                device_manager.device_module.synchronize()
+                if not released:
+                    released = True
+                    buffer = None
+                    del ipc_handle
+
+                    gc.collect()
+                    device_manager.device_module.ipc_collect()
+                    device_manager.device_module.empty_cache()
+                    device_manager.device_module.synchronize()
+                    socket.send(b"")
+                    continue
                 if post_hook is not None:
                     post_hook()
                 device_manager.device_module.synchronize()
