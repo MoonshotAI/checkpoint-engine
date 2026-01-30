@@ -91,6 +91,9 @@ def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Ten
         name: tensor.to(device_manager.device_type) for name, tensor in named_tensors.items()
     }
     _zmq_ctx = zmq.Context()
+    mem_info = device_manager.device_module.mem_get_info()
+    memory_usage = mem_info[1] - mem_info[0]
+    memory_history: list[int] = [memory_usage]
 
     def check(names_to_check: dict[str, bool], weights: list[tuple[str, torch.Tensor]]):
         for name, weight in weights:
@@ -108,6 +111,11 @@ def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Ten
             run=lambda weights: check(names_to_check, weights),
             post_hook=lambda: device_manager.device_module.synchronize(),
         )
+        device_manager.device_module.synchronize()
+        device_manager.device_module.empty_cache()
+        mem_info = device_manager.device_module.mem_get_info()
+        memory_usage = mem_info[1] - mem_info[0]
+        memory_history.append(memory_usage)
         assert all(names_to_check.values())
 
     while True:
@@ -116,6 +124,12 @@ def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Ten
             break
         names_to_check = dict.fromkeys(named_tensors.keys(), False)
         check_weights(names_to_check, socket_paths)
+
+    mem_info = device_manager.device_module.mem_get_info()
+    memory_usage = mem_info[1] - mem_info[0]
+    memory_history.append(memory_usage)
+    for memory in memory_history[1:]:
+        print(f"[rank{rank}] Memory change: {memory - memory_history[0]}")
 
 
 def run(
@@ -318,6 +332,8 @@ if __name__ == "__main__":
     rank_list = json.loads(sys.argv[2])
     if test_type == "test_no_error":
         run(checker_proc, rank_list, need_error=False)
+        mem_info = device_manager.device_module.mem_get_info()
+        print(f"Memory usage: {mem_info[1] - mem_info[0]}")
     elif test_type == "test_with_remote_error":
         run(
             checker_proc_with_error,

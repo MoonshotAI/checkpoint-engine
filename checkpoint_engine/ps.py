@@ -1,4 +1,5 @@
 import ctypes
+import gc
 import os
 import threading
 from collections import defaultdict
@@ -852,6 +853,29 @@ class ParameterServer:
                     gidx += 1
 
             socket.recv()
+            device_mem = self.device_manager.device_module.mem_get_info()
+            logger.info(
+                f"[rank{self._rank}] weights broadcast done, device mem usage: {(device_mem[1] - device_mem[0]) / 1024 / 1024:.2f} MB, allocated memory: {self.device_manager.device_module.memory_allocated() / 1024 / 1024:.2f} MB, reserved memory: {self.device_manager.device_module.memory_reserved() / 1024 / 1024:.2f} MB"
+            )
+            # Notify worker to release handle
+            socket.send_pyobj(None)
+            socket.recv()
+            # Set to None in correct order (views first, then base tensors)
+            del buffer_b, h2d_buffer, buffer, handle
+            self.device_manager.device_module.synchronize()
+            gc.collect()
+            self.device_manager.device_module.ipc_collect()
+            self.device_manager.device_module.empty_cache()
+            self.device_manager.device_module.synchronize()
+
+            # Log actual memory usage
+            device_mem = self.device_manager.device_module.mem_get_info()
+            logger.info(
+                f"[rank{self._rank}] post-release: device mem usage: {(device_mem[1] - device_mem[0]) / 1024 / 1024:.2f} MB, "
+                f"allocated: {self.device_manager.device_module.memory_allocated() / 1024 / 1024:.2f} MB, "
+                f"reserved: {self.device_manager.device_module.memory_reserved() / 1024 / 1024:.2f} MB"
+            )
+            # Notify worker to call post_hook
             socket.send_pyobj(None)
             socket.recv()
         finally:
