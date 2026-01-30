@@ -10,10 +10,10 @@ from typing import Literal
 
 import httpx
 import torch
-import torch.distributed as dist
 from loguru import logger
 from safetensors import safe_open
 
+import checkpoint_engine.distributed as dist
 from checkpoint_engine import request_inference_to_update
 from checkpoint_engine.ps import ParameterServer
 
@@ -159,10 +159,13 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-name", type=str, default="my-checkpoint-iter-0")
     parser.add_argument("--update-method", type=str, default="broadcast")
     parser.add_argument("--uds", type=str, default=None)
+    parser.add_argument("--custom-dist", type=str, default=None)
     args = parser.parse_args()
     rank = int(os.getenv("RANK"))
     world_size = int(os.getenv("WORLD_SIZE"))
+
     req_func = req_inference(args.endpoint, args.inference_parallel_size, args.uds)
+    dist.use_backend(args.custom_dist)
     ps = ParameterServer(auto_pg=True)
     if args.load_metas_file:
         join(
