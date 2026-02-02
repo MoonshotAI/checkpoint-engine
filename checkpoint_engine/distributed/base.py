@@ -225,8 +225,8 @@ def use_backend(backend: str | None):
         return
 
     mapping = {
-        "vllm_nccl": ".nccl.DistributedNccl",
-        "vllm_hccl": ".hccl.DistributedHccl",
+        "vllm_nccl": ".vllm_nccl.DistributedNccl",
+        "vllm_hccl": ".vllm_hccl.DistributedHccl",
     }
     if backend not in mapping:
         raise ValueError(f"Unsupported custom backend: {backend}")
