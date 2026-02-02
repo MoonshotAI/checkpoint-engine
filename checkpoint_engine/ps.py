@@ -7,11 +7,12 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
+import torch.distributed
 import zmq
 from loguru import logger
 from torch.multiprocessing.reductions import reduce_tensor
 
+import checkpoint_engine.distributed as dist
 from checkpoint_engine.data_types import (
     BucketRange,
     DataToGather,
@@ -531,7 +532,7 @@ class ParameterServer:
         Args:
             store: The TCPStore instance to use for synchronization.
         """
-        dist.distributed_c10d._store_based_barrier(
+        torch.distributed.distributed_c10d._store_based_barrier(
             rank=self._rank,
             store=self._store,
             group_name="parameter_server_barrier",
@@ -600,7 +601,10 @@ class ParameterServer:
         return socket, socket_paths
 
     def _detect_bucket_size(
-        self, ranks_group: dist.ProcessGroup | None, *, disable_h2d_buffer: bool = False
+        self,
+        ranks_group: dist.DistributedProcessGroup | None,
+        *,
+        disable_h2d_buffer: bool = False,
     ) -> tuple[int, bool]:
         GiB = 1 << 30  # noqa: N806
         # auto detect bucket size
@@ -617,7 +621,7 @@ class ParameterServer:
             dtype=torch.int64,
             device=self.device_manager.device_type,
         )
-        dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=ranks_group)
+        dist.all_reduce(tensor, op=torch.distributed.ReduceOp.MIN, group=ranks_group)
         tensor = tensor.cpu()
         free_bytes, self._zmq_addr_counter = tensor[0].item(), -tensor[1].item()
         max_tensor_bytes = 0
@@ -719,7 +723,7 @@ class ParameterServer:
         self,
         checkpoint_name: str,
         req_func: Callable[[list[tuple[str, str]]], None],
-        ranks_group: dist.ProcessGroup | None,
+        ranks_group: dist.DistributedProcessGroup | None,
         ranks: list[int] | None = None,
     ):
         assert len(self._current_global_parameter_metas) != 0, "parameter metas is empty"
@@ -838,7 +842,7 @@ class ParameterServer:
                             f"[rank{self._rank}] receive error response from rank {receiver_rank} for bucket {gidx} in checkpoint {checkpoint_name}: {msg}"
                         )
                         ret_code.fill_(1)
-                    dist.all_reduce(ret_code, op=dist.ReduceOp.SUM, group=ranks_group)
+                    dist.all_reduce(ret_code, op=torch.distributed.ReduceOp.SUM, group=ranks_group)
                     self.device_manager.device_module.synchronize()
                     if ret_code.item() != 0:
                         # quit early if any rank failed
