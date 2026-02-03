@@ -278,7 +278,7 @@ class ParameterServer:
         files: list[str] | None = None,
         named_tensors: dict[str, torch.Tensor] | None = None,
         use_shared_memory_pool: bool = False,
-        use_inplace_pin_memory: bool = True,
+        use_inplace_pin_memory: bool | None = None,
     ) -> None:
         """
         Register a checkpoint to the parameter server. Both files and named_tensors will be registered together.
@@ -297,6 +297,12 @@ class ParameterServer:
             use_inplace_pin_memory: If True (default), allows inplace pin memory for /dev/shm/ safetensors files.
                 This option is ignored when ``use_shared_memory_pool`` is True.
         """
+        if use_inplace_pin_memory is None:
+            env_str = os.getenv("PS_USE_INPLACE_PIN_MEMORY", "true")
+            use_inplace_pin_memory = env_str.lower() in ["true", "1", "yes", "y"]
+            logger.info(
+                f"[rank{self._rank}] use_inplace_pin_memory set to {use_inplace_pin_memory} by environment variable PS_USE_INPLACE_PIN_MEMORY={env_str}"
+            )
         if self.device_manager.device_type != "cuda" and use_inplace_pin_memory:
             logger.warning(
                 f"[rank{self._rank}] Only cuda devices support in-place pin memory, set use_inplace_pin_memory to False"
