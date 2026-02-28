@@ -12,9 +12,19 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclResult_t,
 )
 from vllm.distributed.utils import StatelessProcessGroup
-from vllm.utils import current_stream
 
 from checkpoint_engine.distributed.base import CommGroup, Distributed, _common_all_gather_object
+
+
+try:
+    from vllm.utils.torch_utils import current_stream
+except ImportError:
+    try:
+        from vllm.utils import current_stream
+    except ImportError:
+        raise ImportError(
+            "Could not find 'current_stream' in vllm. Please check your vllm version."
+        ) from None
 
 
 class NcclConfigT(ctypes.Structure):
