@@ -41,7 +41,7 @@ class P2PStore:
         self.port = self.engine.get_rpc_port()
         self.named_tensors: dict[str, torch.Tensor] = {}
         logger.info(
-            f"[rank{self.rank}] p2p store initialized, addr is {self.addr}, rdma device is {self.device}"
+            f"[rank{self.rank}] p2p store initialized, protocol {device_manager.transfer_engine_protocol}, addr {self.addr}, device {self.device}"
         )
 
     @property

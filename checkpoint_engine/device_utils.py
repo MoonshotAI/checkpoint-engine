@@ -87,13 +87,19 @@ def _get_my_rdma_device(local_rank: int, gpu_count: int, devices: list[str]) -> 
     if not devices:
         raise RuntimeError("no rdma devices found")
     try:
-        assert len(devices) <= gpu_count, (
-            f"rdma devices count {len(devices)} should be less than or equal to gpu count {gpu_count}"
-        )
-        assert gpu_count % len(devices) == 0, (
-            f"gpu count {gpu_count} should be divisible by rdma devices count {len(devices)}"
-        )
-        return devices[local_rank // (gpu_count // len(devices))]
+        if len(devices) <= gpu_count:
+            assert gpu_count % len(devices) == 0, (
+                f"gpu count {gpu_count} should be divisible by rdma devices count {len(devices)}"
+            )
+            return devices[local_rank // (gpu_count // len(devices))]
+        else:
+            assert len(devices) % gpu_count == 0, (
+                f"rdma devices count {len(devices)} should be divisible by gpu count {gpu_count}"
+            )
+            device_per_rank = len(devices) // gpu_count
+            return ",".join(
+                devices[local_rank * device_per_rank : (local_rank + 1) * device_per_rank]
+            )
     except AssertionError:
         logger.error(
             "Please set 'NCCL_IB_HCA' or 'PS_P2P_STORE_RDMA_DEVICES' environment variable to choose proper number of RDMA devices."
