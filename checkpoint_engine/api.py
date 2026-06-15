@@ -1,3 +1,4 @@
+import pickle
 from collections.abc import Callable
 from typing import Any
 
@@ -78,6 +79,25 @@ def _init_api(ps: ParameterServer) -> Any:
     @app.post("/v1/checkpoints/{checkpoint_name}/gather-metas")
     async def gather_metas(checkpoint_name: str) -> Response:
         return wrap_exception(lambda: ps.gather_metas(checkpoint_name))
+
+    @app.get("/v1/checkpoints/{checkpoint_name}/metas")
+    async def get_metas(checkpoint_name: str) -> Response:
+        try:
+            metas = ps.get_metas()
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"get_metas for {checkpoint_name} failed")
+            return JSONResponse(content=str(e), status_code=500)
+        return Response(content=pickle.dumps(metas), media_type="application/octet-stream")
+
+    @app.post("/v1/checkpoints/{checkpoint_name}/load-metas")
+    async def load_metas(checkpoint_name: str, raw: Request) -> Response:
+        body = await raw.body()
+        try:
+            metas = pickle.loads(body)
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"load_metas pickle decode for {checkpoint_name} failed")
+            return JSONResponse(content=str(e), status_code=400)
+        return wrap_exception(lambda: ps.load_metas(metas))
 
     @app.post("/v1/checkpoints/{checkpoint_name}/update")
     async def update(checkpoint_name: str, req: UpdateRequest) -> Response:
