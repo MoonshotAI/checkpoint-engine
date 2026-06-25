@@ -1,4 +1,3 @@
-import pickle
 from collections.abc import Callable
 from typing import Any
 
@@ -7,9 +6,13 @@ import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from checkpoint_engine.data_types import MemoryBufferMetaList
 from checkpoint_engine.ps import ParameterServer
+
+
+_METAS_ADAPTER = TypeAdapter(dict[int, MemoryBufferMetaList])
 
 
 def request_inference_to_update(
@@ -87,15 +90,18 @@ def _init_api(ps: ParameterServer) -> Any:
         except Exception as e:  # noqa: BLE001
             logger.exception(f"get_metas for {checkpoint_name} failed")
             return JSONResponse(content=str(e), status_code=500)
-        return Response(content=pickle.dumps(metas), media_type="application/octet-stream")
+        return Response(
+            content=_METAS_ADAPTER.dump_json(metas),
+            media_type="application/json",
+        )
 
     @app.post("/v1/checkpoints/{checkpoint_name}/load-metas")
     async def load_metas(checkpoint_name: str, raw: Request) -> Response:
         body = await raw.body()
         try:
-            metas = pickle.loads(body)
-        except Exception as e:  # noqa: BLE001
-            logger.exception(f"load_metas pickle decode for {checkpoint_name} failed")
+            metas = _METAS_ADAPTER.validate_json(body)
+        except ValidationError as e:
+            logger.exception(f"load_metas json validation for {checkpoint_name} failed")
             return JSONResponse(content=str(e), status_code=400)
         return wrap_exception(lambda: ps.load_metas(metas))
 

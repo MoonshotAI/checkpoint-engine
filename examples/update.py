@@ -1,7 +1,6 @@
 import argparse
 import json
 import os
-import pickle
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -11,11 +10,16 @@ from typing import Literal
 import httpx
 import torch
 from loguru import logger
+from pydantic import TypeAdapter
 from safetensors import safe_open
 
 import checkpoint_engine.distributed as dist
 from checkpoint_engine import request_inference_to_update
+from checkpoint_engine.data_types import MemoryBufferMetaList
 from checkpoint_engine.ps import ParameterServer
+
+
+_METAS_ADAPTER = TypeAdapter(dict[int, MemoryBufferMetaList])
 
 
 @contextmanager
@@ -110,7 +114,7 @@ def update_weights(
         ps.gather_metas(checkpoint_name)
     if save_metas_file and int(os.getenv("RANK")) == 0:
         with open(save_metas_file, "wb") as f:
-            pickle.dump(ps.get_metas(), f)
+            f.write(_METAS_ADAPTER.dump_json(ps.get_metas()))
 
     if update_method == "broadcast" or update_method == "all":
         with timer("Update weights without setting ranks"):
@@ -135,7 +139,7 @@ def join(
 ):
     assert load_metas_file, "load_metas_file is required"
     with open(load_metas_file, "rb") as f:
-        metas = pickle.load(f)
+        metas = _METAS_ADAPTER.validate_json(f.read())
     ps.init_process_group()
     check_vllm_ready(endpoint, inference_parallel_size, uds)
     dist.barrier()

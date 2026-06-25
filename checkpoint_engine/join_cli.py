@@ -6,16 +6,23 @@ update the local inference engine (vLLM by default).
 
 The remote side must already have done ``gather_metas`` so that its
 ``ps.get_metas()`` returns a usable ``dict[int, MemoryBufferMetaList]``,
-and the metas pickle bytes must be reachable via either a file path or
+and the metas JSON bytes must be reachable via either a file path or
 an HTTP URL.
 
 Usage (one process per local GPU, e.g. via torchrun):
 
+    # From a local file (e.g. shared moonfs):
     torchrun --nproc-per-node N -m checkpoint_engine.join_cli \\
-        --load-metas-file /path/to/metas.pkl \\
+        --load-metas-file /path/to/metas.json \\
         --endpoint http://localhost:19730 \\
         --inference-parallel-size N \\
         [--checkpoint-name <name>]
+
+    # Or directly from the source ParameterServer's HTTP endpoint:
+    torchrun --nproc-per-node N -m checkpoint_engine.join_cli \\
+        --metas-url http://main-ps-host:19710/v1/checkpoints/<name>/metas \\
+        --endpoint http://localhost:19730 \\
+        --inference-parallel-size N
 
 Environment variables (same as ``torchrun`` sets): ``RANK``, ``WORLD_SIZE``,
 ``LOCAL_RANK``, ``MASTER_ADDR``, ``MASTER_PORT``.
@@ -23,17 +30,21 @@ Environment variables (same as ``torchrun`` sets): ``RANK``, ``WORLD_SIZE``,
 
 import argparse
 import os
-import pickle
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
 
 import httpx
 from loguru import logger
+from pydantic import TypeAdapter
 
 import checkpoint_engine.distributed as dist
 from checkpoint_engine import request_inference_to_update
+from checkpoint_engine.data_types import MemoryBufferMetaList
 from checkpoint_engine.ps import ParameterServer
+
+
+_METAS_ADAPTER = TypeAdapter(dict[int, MemoryBufferMetaList])
 
 
 @contextmanager
@@ -78,14 +89,14 @@ def _req_func_for_inference(
     return req
 
 
-def _load_metas(args: argparse.Namespace) -> dict:
+def _load_metas(args: argparse.Namespace) -> dict[int, MemoryBufferMetaList]:
     if args.load_metas_file:
         with open(args.load_metas_file, "rb") as f:
-            return pickle.load(f)
+            return _METAS_ADAPTER.validate_json(f.read())
     if args.metas_url:
         resp = httpx.get(args.metas_url, timeout=300.0)
         resp.raise_for_status()
-        return pickle.loads(resp.content)
+        return _METAS_ADAPTER.validate_json(resp.content)
     raise ValueError("either --load-metas-file or --metas-url is required")
 
 
@@ -116,11 +127,11 @@ def main() -> None:
         description="Join an existing P2P weight world via mooncake RDMA"
     )
     src = parser.add_mutually_exclusive_group(required=True)
-    src.add_argument("--load-metas-file", type=str, help="Path to a metas pickle file")
+    src.add_argument("--load-metas-file", type=str, help="Path to a metas JSON file")
     src.add_argument(
         "--metas-url",
         type=str,
-        help="HTTP URL returning a metas pickle (application/octet-stream)",
+        help="HTTP URL returning a metas JSON (application/json)",
     )
     parser.add_argument(
         "--endpoint",
