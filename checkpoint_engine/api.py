@@ -83,25 +83,25 @@ def _init_api(ps: ParameterServer) -> Any:
     async def gather_metas(checkpoint_name: str) -> Response:
         return wrap_exception(lambda: ps.gather_metas(checkpoint_name))
 
-    @app.get("/v1/checkpoints/{checkpoint_name}/metas")
-    async def get_metas(checkpoint_name: str) -> Response:
+    @app.get("/v1/metas")
+    async def get_metas() -> Response:
         try:
             metas = ps.get_metas()
         except Exception as e:  # noqa: BLE001
-            logger.exception(f"get_metas for {checkpoint_name} failed")
+            logger.exception("get_metas failed")
             return JSONResponse(content=str(e), status_code=500)
         return Response(
             content=_METAS_ADAPTER.dump_json(metas),
             media_type="application/json",
         )
 
-    @app.post("/v1/checkpoints/{checkpoint_name}/load-metas")
-    async def load_metas(checkpoint_name: str, raw: Request) -> Response:
+    @app.post("/v1/metas")
+    async def load_metas(raw: Request) -> Response:
         body = await raw.body()
         try:
             metas = _METAS_ADAPTER.validate_json(body)
         except ValidationError as e:
-            logger.exception(f"load_metas json validation for {checkpoint_name} failed")
+            logger.exception("load_metas json validation failed")
             return JSONResponse(content=str(e), status_code=400)
         return wrap_exception(lambda: ps.load_metas(metas))
 

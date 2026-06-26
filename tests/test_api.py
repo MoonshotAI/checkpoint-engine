@@ -58,7 +58,7 @@ def test_get_metas_returns_json(
     ps_mock: MagicMock, fake_metas: dict[int, MemoryBufferMetaList]
 ) -> None:
     client = TestClient(_init_api(ps_mock))
-    resp = client.get("/v1/checkpoints/my-ckpt/metas")
+    resp = client.get("/v1/metas")
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/json"
     assert _METAS_ADAPTER.validate_json(resp.content) == fake_metas
@@ -68,7 +68,7 @@ def test_get_metas_returns_json(
 def test_get_metas_propagates_ps_error(ps_mock: MagicMock) -> None:
     ps_mock.get_metas.side_effect = RuntimeError("metas not gathered yet")
     client = TestClient(_init_api(ps_mock))
-    resp = client.get("/v1/checkpoints/my-ckpt/metas")
+    resp = client.get("/v1/metas")
     assert resp.status_code == 500
     assert "metas not gathered yet" in resp.text
 
@@ -78,7 +78,7 @@ def test_load_metas_decodes_and_calls_ps(
 ) -> None:
     client = TestClient(_init_api(ps_mock))
     resp = client.post(
-        "/v1/checkpoints/my-ckpt/load-metas",
+        "/v1/metas",
         content=_METAS_ADAPTER.dump_json(fake_metas),
         headers={"content-type": "application/json"},
     )
@@ -89,7 +89,7 @@ def test_load_metas_decodes_and_calls_ps(
 def test_load_metas_rejects_bad_json(ps_mock: MagicMock) -> None:
     client = TestClient(_init_api(ps_mock))
     resp = client.post(
-        "/v1/checkpoints/my-ckpt/load-metas",
+        "/v1/metas",
         content=b"not a valid json",
     )
     assert resp.status_code == 400
@@ -100,7 +100,7 @@ def test_load_metas_rejects_schema_mismatch(ps_mock: MagicMock) -> None:
     """JSON that parses but doesn't match MemoryBufferMetaList shape -> 400."""
     client = TestClient(_init_api(ps_mock))
     resp = client.post(
-        "/v1/checkpoints/my-ckpt/load-metas",
+        "/v1/metas",
         content=b'{"0": {"foo": "bar"}}',
     )
     assert resp.status_code == 400
@@ -113,7 +113,7 @@ def test_load_metas_propagates_ps_error(
     ps_mock.load_metas.side_effect = RuntimeError("rdma device mismatch")
     client = TestClient(_init_api(ps_mock))
     resp = client.post(
-        "/v1/checkpoints/my-ckpt/load-metas",
+        "/v1/metas",
         content=_METAS_ADAPTER.dump_json(fake_metas),
     )
     assert resp.status_code == 500
@@ -123,12 +123,12 @@ def test_load_metas_propagates_ps_error(
 def test_round_trip_get_then_load(
     ps_mock: MagicMock, fake_metas: dict[int, MemoryBufferMetaList]
 ) -> None:
-    """JSON bytes returned by GET /metas must be accepted by POST /load-metas."""
+    """JSON bytes returned by GET /v1/metas must be accepted by POST /v1/metas."""
     client = TestClient(_init_api(ps_mock))
-    get_resp = client.get("/v1/checkpoints/source/metas")
+    get_resp = client.get("/v1/metas")
     assert get_resp.status_code == 200
     load_resp = client.post(
-        "/v1/checkpoints/dest/load-metas",
+        "/v1/metas",
         content=get_resp.content,
     )
     assert load_resp.status_code == 200
