@@ -131,15 +131,22 @@ def update_weights(
 def join(
     ps: ParameterServer,
     checkpoint_name: str,
-    load_metas_file: str,
+    load_metas_file: str | None,
+    metas_url: str | None,
     req_func: Callable[[list[tuple[str, str]]], None],
     inference_parallel_size: int,
     endpoint: str,
     uds: str | None = None,
 ):
-    assert load_metas_file, "load_metas_file is required"
-    with open(load_metas_file, "rb") as f:
-        metas = _METAS_ADAPTER.validate_json(f.read())
+    if load_metas_file:
+        with open(load_metas_file, "rb") as f:
+            metas = _METAS_ADAPTER.validate_json(f.read())
+    elif metas_url:
+        resp = httpx.get(metas_url, timeout=300.0)
+        resp.raise_for_status()
+        metas = _METAS_ADAPTER.validate_json(resp.content)
+    else:
+        raise ValueError("either load_metas_file or metas_url is required")
     ps.init_process_group()
     check_vllm_ready(endpoint, inference_parallel_size, uds)
     dist.barrier()
@@ -156,7 +163,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Update weights example")
     parser.add_argument("--checkpoint-path", type=str, default=None)
     parser.add_argument("--save-metas-file", type=str, default=None)
-    parser.add_argument("--load-metas-file", type=str, default=None)
+    metas_src = parser.add_mutually_exclusive_group()
+    metas_src.add_argument(
+        "--load-metas-file",
+        type=str,
+        default=None,
+        help="Path to a metas JSON file (triggers join mode)",
+    )
+    metas_src.add_argument(
+        "--metas-url",
+        type=str,
+        default=None,
+        help="HTTP URL returning a metas JSON (triggers join mode)",
+    )
     parser.add_argument("--sleep-time", type=int, default=0)
     parser.add_argument("--endpoint", type=str, default="http://localhost:19730")
     parser.add_argument("--inference-parallel-size", type=int, default=8)
@@ -171,11 +190,12 @@ if __name__ == "__main__":
     req_func = req_inference(args.endpoint, args.inference_parallel_size, args.uds)
     dist.use_backend(args.custom_dist)
     ps = ParameterServer(auto_pg=True)
-    if args.load_metas_file:
+    if args.load_metas_file or args.metas_url:
         join(
             ps,
             args.checkpoint_name,
             args.load_metas_file,
+            args.metas_url,
             req_func,
             args.inference_parallel_size,
             args.endpoint,
