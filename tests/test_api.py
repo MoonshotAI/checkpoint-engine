@@ -91,6 +91,7 @@ def test_load_metas_rejects_bad_json(ps_mock: MagicMock) -> None:
     resp = client.post(
         "/v1/metas",
         content=b"not a valid json",
+        headers={"content-type": "application/json"},
     )
     assert resp.status_code == 422
     ps_mock.load_metas.assert_not_called()
@@ -102,6 +103,7 @@ def test_load_metas_rejects_schema_mismatch(ps_mock: MagicMock) -> None:
     resp = client.post(
         "/v1/metas",
         content=b'{"0": {"foo": "bar"}}',
+        headers={"content-type": "application/json"},
     )
     assert resp.status_code == 422
     ps_mock.load_metas.assert_not_called()
@@ -115,6 +117,7 @@ def test_load_metas_propagates_ps_error(
     resp = client.post(
         "/v1/metas",
         content=_METAS_ADAPTER.dump_json(fake_metas),
+        headers={"content-type": "application/json"},
     )
     assert resp.status_code == 500
     assert "rdma device mismatch" in resp.text
