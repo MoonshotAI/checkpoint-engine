@@ -92,18 +92,18 @@ def test_load_metas_rejects_bad_json(ps_mock: MagicMock) -> None:
         "/v1/metas",
         content=b"not a valid json",
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 422
     ps_mock.load_metas.assert_not_called()
 
 
 def test_load_metas_rejects_schema_mismatch(ps_mock: MagicMock) -> None:
-    """JSON that parses but doesn't match MemoryBufferMetaList shape -> 400."""
+    """JSON that parses but doesn't match MemoryBufferMetaList shape -> 422."""
     client = TestClient(_init_api(ps_mock))
     resp = client.post(
         "/v1/metas",
         content=b'{"0": {"foo": "bar"}}',
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 422
     ps_mock.load_metas.assert_not_called()
 
 
@@ -130,6 +130,7 @@ def test_round_trip_get_then_load(
     load_resp = client.post(
         "/v1/metas",
         content=get_resp.content,
+        headers={"content-type": "application/json"},
     )
     assert load_resp.status_code == 200
     ps_mock.load_metas.assert_called_once_with(fake_metas)

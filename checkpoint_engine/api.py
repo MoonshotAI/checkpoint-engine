@@ -3,16 +3,13 @@ from typing import Any
 
 import fastapi
 import httpx
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from loguru import logger
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel
 
 from checkpoint_engine.data_types import MemoryBufferMetaList
 from checkpoint_engine.ps import ParameterServer
-
-
-_METAS_ADAPTER = TypeAdapter(dict[int, MemoryBufferMetaList])
 
 
 def request_inference_to_update(
@@ -84,25 +81,15 @@ def _init_api(ps: ParameterServer) -> Any:
         return wrap_exception(lambda: ps.gather_metas(checkpoint_name))
 
     @app.get("/v1/metas")
-    async def get_metas() -> Response:
+    async def get_metas() -> dict[int, MemoryBufferMetaList]:
         try:
-            metas = ps.get_metas()
-        except Exception as e:  # noqa: BLE001
+            return ps.get_metas()
+        except Exception as e:
             logger.exception("get_metas failed")
-            return JSONResponse(content=str(e), status_code=500)
-        return Response(
-            content=_METAS_ADAPTER.dump_json(metas),
-            media_type="application/json",
-        )
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     @app.post("/v1/metas")
-    async def load_metas(raw: Request) -> Response:
-        body = await raw.body()
-        try:
-            metas = _METAS_ADAPTER.validate_json(body)
-        except ValidationError as e:
-            logger.exception("load_metas json validation failed")
-            return JSONResponse(content=str(e), status_code=400)
+    async def load_metas(metas: dict[int, MemoryBufferMetaList]) -> Response:
         return wrap_exception(lambda: ps.load_metas(metas))
 
     @app.post("/v1/checkpoints/{checkpoint_name}/update")
