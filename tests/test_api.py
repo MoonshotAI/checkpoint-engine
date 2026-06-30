@@ -1,13 +1,16 @@
 """CPU-only tests for the metas endpoints in api.py."""
 
-from unittest.mock import MagicMock
+from types import TracebackType
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
+from typing_extensions import Self
 
-from checkpoint_engine.api import _init_api
+from checkpoint_engine.api import _init_api, request_inference_to_update
 from checkpoint_engine.data_types import (
     MemoryBufferMetaList,
     MemoryBufferMetas,
@@ -152,3 +155,48 @@ def test_load_metas_filters_empty_owners(fake_metas: dict[int, MemoryBufferMetaL
 
     assert ps.get_metas() == fake_metas
     assert all(2 not in ranks for ranks in ps._remote_rdma_devices.values())
+
+
+def test_request_inference_to_update_closes_httpx_client() -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            pass
+
+    class FakeClient:
+        closed = False
+        payload = None
+
+        def __init__(self, *, transport: Any):
+            self.transport = transport
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            type(self).closed = True
+
+        def post(self, url: str, *, json: dict[str, Any], timeout: float) -> FakeResponse:
+            type(self).payload = (url, json, timeout)
+            return FakeResponse()
+
+    with (
+        patch("checkpoint_engine.api.httpx.HTTPTransport", return_value="transport"),
+        patch("checkpoint_engine.api.httpx.Client", FakeClient),
+    ):
+        request_inference_to_update("http://example/update", {"GPU-0": "ipc://x"}, timeout=1.5)
+
+    assert FakeClient.closed is True
+    assert FakeClient.payload == (
+        "http://example/update",
+        {
+            "method": "update_weights_from_ipc",
+            "args": [{"GPU-0": "ipc://x"}],
+            "timeout": 1.5,
+        },
+        1.5,
+    )
