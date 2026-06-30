@@ -57,8 +57,8 @@ def test_get_rdma_devices_no_env_vars(mock_available_devices: list[str]):
         pytest.param("", ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"], id="empty string"),
         pytest.param("   \t\n  ", ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"], id="whitespace"),
         pytest.param("None", [], id="None string"),
-        pytest.param("^", ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"], id="caret"),
-        pytest.param("^=", ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"], id="caret-equals"),
+        pytest.param("^", [], id="caret"),
+        pytest.param("^=", [], id="caret-equals"),
         pytest.param("=^", [], id="equals-caret"),
         pytest.param("^^", ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"], id="double-caret"),
         pytest.param("=", [], id="equals"),
@@ -101,6 +101,12 @@ def test_parse_various_patterns(
     """Test various parsing patterns"""
     result = _parse_NCCL_IB_HCA(input_value, mock_available_devices)
     assert result == expected
+
+
+def test_parse_prefix_when_prefix_is_also_device_name() -> None:
+    """Bare NCCL_IB_HCA tokens are prefixes unless the value starts with '='."""
+    result = _parse_NCCL_IB_HCA("mlx5", ["mlx5", "mlx5_0", "mlx5_1"])
+    assert result == ["mlx5", "mlx5_0", "mlx5_1"]
 
 
 @pytest.mark.parametrize(

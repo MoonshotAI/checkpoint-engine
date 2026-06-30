@@ -140,6 +140,8 @@ def _parse_NCCL_IB_HCA(value: str, available_devices: list[str]) -> list[str]:
         value = value.removeprefix("=")
 
     device_specs = [spec.strip() for spec in value.split(",") if spec.strip()]
+    if is_exclude and not device_specs:
+        return []
 
     result = _resolve_device_specs(device_specs, is_exact_match, available_devices)
     if is_exclude:
@@ -163,7 +165,7 @@ def _resolve_device_specs(
         # port = parts[1].strip() if len(parts) > 1 else None
         base_devices = (
             [device_name]
-            if device_name in available_devices
+            if is_exact_match and device_name in available_devices
             else []
             if is_exact_match
             else [dev for dev in available_devices if dev.startswith(device_name)]
