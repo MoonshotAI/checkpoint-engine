@@ -13,6 +13,7 @@ from checkpoint_engine.data_types import (
     MemoryBufferMetas,
     ParameterMeta,
 )
+from checkpoint_engine.ps import ParameterServer
 
 
 _METAS_ADAPTER = TypeAdapter(dict[int, MemoryBufferMetaList])
@@ -137,3 +138,17 @@ def test_round_trip_get_then_load(
     )
     assert load_resp.status_code == 200
     ps_mock.load_metas.assert_called_once_with(fake_metas)
+
+
+def test_load_metas_filters_empty_owners(fake_metas: dict[int, MemoryBufferMetaList]) -> None:
+    ps = ParameterServer.__new__(ParameterServer)
+    empty_meta = MemoryBufferMetaList(
+        p2p_store_addr="192.168.1.2:12345",
+        rdma_device="mlx5_2",
+        memory_buffer_metas_list=[],
+    )
+
+    ps.load_metas({**fake_metas, 2: empty_meta})
+
+    assert ps.get_metas() == fake_metas
+    assert all(2 not in ranks for ranks in ps._remote_rdma_devices.values())

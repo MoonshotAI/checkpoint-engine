@@ -262,7 +262,9 @@ class ParameterServer:
         return self._current_global_parameter_metas
 
     def load_metas(self, metas: dict[int, MemoryBufferMetaList]):
-        self._current_global_parameter_metas = metas
+        self._current_global_parameter_metas = {
+            rank: meta for rank, meta in metas.items() if meta.memory_buffer_metas_list
+        }
         self._remote_rdma_devices = defaultdict(set)
         for i, meta in self._current_global_parameter_metas.items():
             assert meta.rdma_device is not None, "meta.rdma_device should not be None"
