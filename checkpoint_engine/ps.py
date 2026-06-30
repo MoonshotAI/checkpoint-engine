@@ -32,6 +32,15 @@ if TYPE_CHECKING:
     from checkpoint_engine.data_types import T
 
 
+_CUDA_HOST_REGISTER_DEFAULT = 0x00
+_CUDA_HOST_REGISTER_MAPPED = 0x02
+_MANUAL_PIN_MEMORY_FLAGS = (_CUDA_HOST_REGISTER_DEFAULT, _CUDA_HOST_REGISTER_MAPPED)
+
+
+def _is_valid_manual_pin_memory_flag(flag: int) -> bool:
+    return flag in _MANUAL_PIN_MEMORY_FLAGS
+
+
 def _to_named_tensor(metas: list[ParameterMeta], offset: int = 0) -> list[dict]:
     ret = []
     for meta in metas:
@@ -401,8 +410,9 @@ class ParameterServer:
                 # cudaHostRegisterMapped              0x02  /**< Map registered memory into device space */
                 # cudaHostRegisterIoMemory            0x04  /**< Memory-mapped I/O space */
                 # cudaHostRegisterReadOnly            0x08  /**< Memory-mapped read-only */
-                assert p_flags.value == 0x02, (
-                    f"pin memory flag error, expected: 0x02 (cudaHostRegisterMapped), got flag: {p_flags.value}"
+                assert _is_valid_manual_pin_memory_flag(p_flags.value), (
+                    "pin memory flag error, expected: 0x00 (cudaHostRegisterDefault) "
+                    f"or 0x02 (cudaHostRegisterMapped), got flag: {p_flags.value}"
                 )
                 cudart = torch.cuda.cudart()
                 r = cudart.cudaHostUnregister(t.data_ptr())
