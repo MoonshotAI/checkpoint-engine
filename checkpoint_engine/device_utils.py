@@ -25,9 +25,19 @@ def get_ip() -> str:
         return socket.gethostbyname(socket.gethostname())
 
 
+def _get_npu_device_count() -> int:
+    npu = getattr(torch, "npu", None)
+    device_count = getattr(npu, "device_count", None)
+    if callable(device_count):
+        count = int(device_count())
+        if count > 0:
+            return count
+    return 8
+
+
 def npu_generate_uuid() -> str:
     str_pid = str(os.getpid())
-    npu_num = 8
+    npu_num = _get_npu_device_count()
     try:
         for npu_id in range(npu_num):
             cmd = ["npu-smi", "info", "-t", "proc-mem", "-i", str(npu_id)]
@@ -36,9 +46,13 @@ def npu_generate_uuid() -> str:
             if str_pid in str_result:
                 # In A3 server, one NPU has two chips.
                 match_chip_count = re.search(r"Chip Count[^\d]*(\d+)", str_result)
+                if match_chip_count is None:
+                    raise ValueError(f"Failed to parse NPU chip count for npu_id {npu_id}")
                 chip_count = int(match_chip_count.group(1))
                 search_after_pid = str_result[str_result.find(str_pid) + len(str_pid) :]
                 match_chip_id = re.search(r"Chip ID[^\d]*(\d+)", search_after_pid)
+                if match_chip_id is None:
+                    raise ValueError(f"Failed to parse NPU chip id for npu_id {npu_id}")
                 chip_id = int(match_chip_id.group(1))
                 return f"{get_ip()}-{npu_id * chip_count + chip_id}"
         raise ValueError("The current process is not running on the npu device")
