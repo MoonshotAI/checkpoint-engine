@@ -718,9 +718,14 @@ class ParameterServer:
             if checkpoint_name != self._current_shared_memory_pool_user
             else self.shared_memory_pool_name
         )
-        return self._p2p_store.unregister_named_tensors(
-            [f"memory_pool_{unregister_name}_{idx}" for idx, _ in enumerate(pool)]
-        )
+        names = [
+            name
+            for idx, _ in enumerate(pool)
+            if (name := f"memory_pool_{unregister_name}_{idx}") in self._p2p_store.named_tensors
+        ]
+        if not names:
+            return 0
+        return self._p2p_store.unregister_named_tensors(names)
 
     def _update_per_bucket(
         self,
