@@ -25,21 +25,36 @@ def get_ip() -> str:
         return socket.gethostbyname(socket.gethostname())
 
 
-def _get_npu_device_count() -> int:
+def _get_npu_visible_physical_ids() -> list[int]:
+    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
+    if not visible_devices:
+        return []
+    npu_ids = []
+    for device_id in visible_devices.split(","):
+        device_id = device_id.strip()
+        if device_id.isdigit():
+            npu_ids.append(int(device_id))
+    return npu_ids
+
+
+def _get_npu_ids_to_scan() -> range | list[int]:
+    visible_physical_ids = _get_npu_visible_physical_ids()
+    if visible_physical_ids:
+        return visible_physical_ids
+
     npu = getattr(torch, "npu", None)
     device_count = getattr(npu, "device_count", None)
     if callable(device_count):
         count = int(device_count())
         if count > 0:
-            return count
-    return 8
+            return range(max(8, count))
+    return range(8)
 
 
 def npu_generate_uuid() -> str:
     str_pid = str(os.getpid())
-    npu_num = _get_npu_device_count()
     try:
-        for npu_id in range(npu_num):
+        for npu_id in _get_npu_ids_to_scan():
             cmd = ["npu-smi", "info", "-t", "proc-mem", "-i", str(npu_id)]
             result = subprocess.run(cmd, check=True, capture_output=True, text=True)  # noqa: S603
             str_result = str(result.stdout)
