@@ -77,8 +77,11 @@ def _get_rdma_devices() -> list[str]:
     if devices_str:
         return devices_str.split(",")
     # if PS_P2P_STORE_RDMA_DEVICES is not set, try to use NCCL_IB_HCA to get RDMA devices
-    hca = os.getenv("NCCL_IB_HCA", None)
-    return _parse_NCCL_IB_HCA(hca or "", _ibv_get_device_list()) or _ibv_get_device_list()
+    hca = os.getenv("NCCL_IB_HCA")
+    devices = _ibv_get_device_list()
+    if hca is not None:
+        return _parse_NCCL_IB_HCA(hca, devices)
+    return devices
 
 
 def _get_my_rdma_device(local_rank: int, gpu_count: int, devices: list[str]) -> str:

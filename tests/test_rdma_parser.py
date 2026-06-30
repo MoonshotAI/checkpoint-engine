@@ -143,7 +143,8 @@ def test_parse_exact_match_with_nonexistent_device(
         ("NCCL_IB_HCA", "mlx5", ["mlx5_0", "mlx5_1"]),
         ("NCCL_IB_HCA", "mlx5_0,mlx5_1", ["mlx5_0", "mlx5_1"]),
         ("NCCL_IB_HCA", "^mlx5_0", ["mlx5_1", "mlx4_0", "mlx4_1"]),
-        ("NCCL_IB_HCA", "mlx6", ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"]),
+        ("NCCL_IB_HCA", "mlx6", []),
+        ("NCCL_IB_HCA", "^=", []),
         ("NCCL_IB_HCA", "", ["mlx5_0", "mlx5_1", "mlx4_0", "mlx4_1"]),
     ],
 )
