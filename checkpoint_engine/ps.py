@@ -799,6 +799,7 @@ class ParameterServer:
 
         gidx = 0
         ret_code = torch.zeros((), device=self.device_manager.device_type, dtype=torch.int64)
+        buffer_b: torch.Tensor | None = None
         try:
             for i in range(max_len):
                 if i < len(receiver_rank_buckets) and not disable_h2d_buffer:
