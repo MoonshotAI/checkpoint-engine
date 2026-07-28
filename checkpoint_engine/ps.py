@@ -188,7 +188,7 @@ class ParameterServer:
                 Notice that if auto_pg is True, will destroy the process group after update. It is recommended to set auto_pg to True!
             mem_fraction: The proportion (as a fraction) of the current free device memory for allocation.
         """
-        self._rank = rank or int(os.environ["RANK"])
+        self._rank = rank if rank is not None else int(os.environ["RANK"])
         self._world_size = world_size or int(os.environ["WORLD_SIZE"])
         self.device_manager = DeviceManager()
         self._gpu_count = gpu_count or self.device_manager.device_module.device_count()
