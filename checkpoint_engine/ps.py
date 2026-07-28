@@ -148,7 +148,7 @@ def _assign_receiver_ranks(
             owner_rank, bucket = flattened_buckets[assigned_cnt]
             rdma_device = rank_to_rdma_device[owner_rank]
             if rdma_device in occupied_devices:
-                break
+                continue
             buckets_with_receiver.append((receiver_rank, owner_rank, bucket))
             occupied_devices.add(rdma_device)
             assigned_cnt += 1
