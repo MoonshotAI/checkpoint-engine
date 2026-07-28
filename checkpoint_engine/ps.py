@@ -148,7 +148,7 @@ def _assign_receiver_ranks(
             owner_rank, bucket = flattened_buckets[assigned_cnt]
             rdma_device = rank_to_rdma_device[owner_rank]
             if rdma_device in occupied_devices:
-                break
+                continue
             buckets_with_receiver.append((receiver_rank, owner_rank, bucket))
             occupied_devices.add(rdma_device)
             assigned_cnt += 1
@@ -188,7 +188,7 @@ class ParameterServer:
                 Notice that if auto_pg is True, will destroy the process group after update. It is recommended to set auto_pg to True!
             mem_fraction: The proportion (as a fraction) of the current free device memory for allocation.
         """
-        self._rank = rank or int(os.environ["RANK"])
+        self._rank = rank if rank is not None else int(os.environ["RANK"])
         self._world_size = world_size or int(os.environ["WORLD_SIZE"])
         self.device_manager = DeviceManager()
         self._gpu_count = gpu_count or self.device_manager.device_module.device_count()
@@ -798,6 +798,7 @@ class ParameterServer:
         socket.send_pyobj(handle)
 
         gidx = 0
+        buffer_b: torch.Tensor | None = None
         ret_code = torch.zeros((), device=self.device_manager.device_type, dtype=torch.int64)
         try:
             for i in range(max_len):

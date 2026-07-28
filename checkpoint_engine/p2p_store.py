@@ -56,11 +56,19 @@ class P2PStore:
             logger.info(
                 f"[rank{self.rank}] p2p store register tensor {name} with addr {hex(buffer_addresses[i])} and capacity {capacities[i]}"
             )
-        assert self.engine.batch_register_memory(buffer_addresses, capacities) == 0
+        ret = self.engine.batch_register_memory(buffer_addresses, capacities)
+        if ret != 0:
+            raise RuntimeError(
+                f"[rank{self.rank}] p2p batch_register_memory failed with error code {ret}"
+            )
 
     def unregister_named_tensors(self, names: list[str]) -> int:
         buffer_addresses = [self.named_tensors[name].data_ptr() for name in names]
-        assert self.engine.batch_unregister_memory(buffer_addresses) == 0
+        ret = self.engine.batch_unregister_memory(buffer_addresses)
+        if ret != 0:
+            raise RuntimeError(
+                f"[rank{self.rank}] p2p batch_unregister_memory failed with error code {ret}"
+            )
         num_unregistered = 0
         for i, name in enumerate(names):
             del self.named_tensors[name]
@@ -73,6 +81,8 @@ class P2PStore:
     def batch_transfer_sync_read(
         self, target_hostname: str, buf_ptrs: list[int], remote_ptrs: list[int], lens: list[int]
     ):
-        assert (
-            self.engine.batch_transfer_sync_read(target_hostname, buf_ptrs, remote_ptrs, lens) == 0
-        )
+        ret = self.engine.batch_transfer_sync_read(target_hostname, buf_ptrs, remote_ptrs, lens)
+        if ret != 0:
+            raise RuntimeError(
+                f"[rank{self.rank}] p2p batch_transfer_sync_read failed with error code {ret}"
+            )
