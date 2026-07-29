@@ -5,7 +5,6 @@ import subprocess
 import sys
 import time
 from contextlib import nullcontext
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -17,14 +16,8 @@ from checkpoint_engine.ps import ParameterServer, _get_physical_gpu_id
 from checkpoint_engine.worker import update_weights_from_ipc
 
 
-try:
-    device_manager = DeviceManager()
-except TypeError:
-    device_manager = SimpleNamespace(device_module=SimpleNamespace(device_count=lambda: 0))
-
-
 def get_world_size() -> int:
-    return device_manager.device_module.device_count()
+    return DeviceManager().device_module.device_count()
 
 
 def gen_test_tensors(rank: int) -> list[tuple[str, torch.Tensor]]:
@@ -52,6 +45,7 @@ def gen_test_tensors(rank: int) -> list[tuple[str, torch.Tensor]]:
 def checker_proc_with_error(
     rank: int, device_uuid: str, named_tensors: dict[str, torch.Tensor], queue: Queue
 ):
+    device_manager = DeviceManager()
     device_manager.device_module.set_device(rank)
     named_tensors = {
         name: tensor.to(device_manager.device_type) for name, tensor in named_tensors.items()
@@ -86,6 +80,7 @@ def checker_proc_with_error(
 
 
 def checker_proc(rank: int, device_uuid: str, named_tensors: dict[str, torch.Tensor], queue: Queue):
+    device_manager = DeviceManager()
     device_manager.device_module.set_device(rank)
     named_tensors = {
         name: tensor.to(device_manager.device_type) for name, tensor in named_tensors.items()
@@ -150,6 +145,7 @@ def run(
         )
         assert exception_msg is None, "exception_msg must be None when need_error is False."
 
+    device_manager = DeviceManager()
     rank = int(os.getenv("RANK"))
     ctx = get_context("spawn")
     queue = ctx.Queue()
@@ -180,6 +176,8 @@ def run(
 def run_with_files(
     checker_func: callable,
 ):
+    device_manager = DeviceManager()
+    world_size = device_manager.device_module.device_count()
     rank = int(os.getenv("RANK"))
     ctx = get_context("spawn")
     queue = ctx.Queue()
@@ -203,15 +201,13 @@ def run_with_files(
     tensors_in_disk = dict(tensors_items[len(tensors_items) // 3 : 2 * len(tensors_items) // 3])
     tensors_in_memory = dict(tensors_items[1 * len(tensors_items) // 2 :])
     disk_files = [
-        os.path.join(disk_dir, f"rank{_rank}_checkpoint.safetensors")
-        for _rank in range(get_world_size())
+        os.path.join(disk_dir, f"rank{_rank}_checkpoint.safetensors") for _rank in range(world_size)
     ]
     safetensors.torch.save_file(tensors_in_disk, disk_files[rank])
     time.sleep(1)
     files.append(disk_files[rank])
     dev_shm_files = [
-        os.path.join(dev_shm_dir, f"rank{rank}_checkpoint.safetensors")
-        for _ in range(get_world_size())
+        os.path.join(dev_shm_dir, f"rank{rank}_checkpoint.safetensors") for _ in range(world_size)
     ]
     safetensors.torch.save_file(tensors_in_dev_shm, dev_shm_files[rank])
     time.sleep(1)
@@ -236,32 +232,38 @@ def run_with_files(
     assert proc.exitcode == 0
 
 
+def build_rank_list(case: str, world_size: int) -> list[list[int]]:
+    if case == "split":
+        return [
+            list(range(world_size // 2)),
+            list(range(world_size // 2, world_size)),
+            [],
+            list(range(world_size)),
+        ]
+    if case == "remote_error":
+        return [[]]
+    if case == "random_subsets":
+        return [
+            list(random.sample(range(world_size), k=num_ranks))
+            for num_ranks in range(world_size + 1)
+        ]
+    raise ValueError(f"Unknown rank list case: {case}")
+
+
 @pytest.mark.gpu
 @pytest.mark.parametrize(
-    "test_name,rank_list",
+    "test_name,rank_list_case",
     [
-        (
-            "test_no_error",
-            [
-                list(range(get_world_size() // 2)),
-                list(range(get_world_size() // 2, get_world_size())),
-                [],
-                list(range(get_world_size())),
-            ],
-        ),
-        ("test_with_remote_error", [[]]),
-        (
-            "test_no_error",
-            [
-                list(random.sample(range(get_world_size()), k=num_ranks))
-                for num_ranks in range(get_world_size() + 1)
-            ],
-        ),
+        pytest.param("test_no_error", "split", id="split-ranks"),
+        pytest.param("test_with_remote_error", "remote_error", id="remote-error"),
+        pytest.param("test_no_error", "random_subsets", id="random-subsets"),
     ],
 )
-def test_update(test_name: str, rank_list: list[list[int]] | None):
+def test_update(device_manager: DeviceManager, test_name: str, rank_list_case: str):
     world_size = device_manager.device_module.device_count()
-    assert world_size >= 2, "This test requires at least 2 GPUs."
+    if world_size < 2:
+        pytest.skip("This test requires at least 2 GPUs/NPUs.")
+    rank_list = build_rank_list(rank_list_case, world_size)
     master_addr = "localhost"
     master_port = 25400
 
@@ -291,9 +293,10 @@ def test_update(test_name: str, rank_list: list[list[int]] | None):
 
 
 @pytest.mark.gpu
-def test_update_with_files(test_name: str = "test_with_files"):
+def test_update_with_files(device_manager: DeviceManager, test_name: str = "test_with_files"):
     world_size = device_manager.device_module.device_count()
-    assert world_size >= 2, "This test requires at least 2 GPUs."
+    if world_size < 2:
+        pytest.skip("This test requires at least 2 GPUs/NPUs.")
     master_addr = "localhost"
     master_port = 25400
     cmd = [
@@ -332,6 +335,7 @@ if __name__ == "__main__":
     rank_list = json.loads(sys.argv[2])
     if test_type == "test_no_error":
         run(checker_proc, rank_list, need_error=False)
+        device_manager = DeviceManager()
         mem_info = device_manager.device_module.mem_get_info()
         print(f"Memory usage: {mem_info[1] - mem_info[0]}")
     elif test_type == "test_with_remote_error":
