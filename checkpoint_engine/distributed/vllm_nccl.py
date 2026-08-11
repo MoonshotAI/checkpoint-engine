@@ -14,6 +14,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 from vllm.distributed.utils import StatelessProcessGroup
 
 from checkpoint_engine.distributed.base import CommGroup, Distributed, _common_all_gather_object
+from checkpoint_engine.distributed.vllm_compat import create_stateless_process_group
 
 
 try:
@@ -153,7 +154,12 @@ class DistributedNccl(Distributed):
         self.world_size = world_size
         self.device = torch.device("cuda", torch.cuda.current_device())
 
-        self.pg = StatelessProcessGroup(rank=rank, world_size=world_size, store=store, socket=None)
+        self.pg = create_stateless_process_group(
+            StatelessProcessGroup,
+            rank=rank,
+            world_size=world_size,
+            store=store,
+        )
         self.pynccl = PyNcclCommunicatorEx(group=self.pg, device=self.device)
         self.comm = self.pynccl.comm
         self.initialized = True

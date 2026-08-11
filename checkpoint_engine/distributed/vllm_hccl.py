@@ -19,6 +19,7 @@ from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
 from vllm_ascend.utils import current_stream
 
 from checkpoint_engine.distributed.base import CommGroup, Distributed, _common_all_gather_object
+from checkpoint_engine.distributed.vllm_compat import create_stateless_process_group
 
 
 class HcclCommConfig(ctypes.Structure):
@@ -240,7 +241,12 @@ class DistributedHccl(Distributed):
         self.world_size = world_size
         self.device = torch.device("npu", torch.npu.current_device())
 
-        self.pg = StatelessProcessGroup(rank=rank, world_size=world_size, store=store, socket=None)
+        self.pg = create_stateless_process_group(
+            StatelessProcessGroup,
+            rank=rank,
+            world_size=world_size,
+            store=store,
+        )
         self.pyhccl = PyHcclCommunicatorEx(group=self.pg, device=self.device)
         self.comm = self.pyhccl.comm
         self.initialized = True
