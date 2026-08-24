@@ -49,10 +49,10 @@ def check_vllm_ready(endpoint: str, inference_parallel_size: int, uds: str | Non
 
 
 def split_checkpoint_files(checkpoint_path: str, rank: int, world_size: int) -> list[str]:
-    checkpoint_files = [
+    checkpoint_files = sorted(
         os.path.join(checkpoint_path, f)
         for f in filter(lambda x: x.endswith(".safetensors"), os.listdir(checkpoint_path))
-    ]
+    )
     files_per_rank = (len(checkpoint_files) + world_size - 1) // world_size
     return checkpoint_files[rank * files_per_rank : (rank + 1) * files_per_rank]
 
