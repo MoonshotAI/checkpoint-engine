@@ -66,3 +66,14 @@ def test_basic_functionality(
 ):
     assert len(expected_results) == len(buckets)
     assert set(expected_results) == set(_assign_receiver_ranks(buckets, local_topo, remote_topo))
+
+
+def test_non_empty_buckets_require_local_receiver_ranks():
+    with pytest.raises(
+        ValueError, match="cannot assign non-empty buckets without local receiver ranks"
+    ):
+        _assign_receiver_ranks(
+            [(7, "bucket")],
+            {},
+            {"mlx5_0": {7}},
+        )

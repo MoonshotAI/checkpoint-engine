@@ -135,6 +135,8 @@ def _assign_receiver_ranks(
     # Select receiver ranks. We use the minimum rank in each local RDMA device group as receiver rank
     num_receivers = min(len(local_topo), len(buckets_by_rdma_device))
     receiver_list = [min(ranks) for ranks in list(local_topo.values())[:num_receivers]]
+    if not receiver_list:
+        raise ValueError("cannot assign non-empty buckets without local receiver ranks")
 
     flattened_buckets = [
         buckets_matrix[row][col]
