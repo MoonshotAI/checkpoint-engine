@@ -273,6 +273,7 @@ class ParameterServer:
             is_master=self._rank == 0,
         )
         self._store_counter = 0
+        self._store_barrier_counter = 0
 
     def _get_memory_pool(self, checkpoint_name: str) -> list[MemoryBuffer]:
         if checkpoint_name == self._current_shared_memory_pool_user:
@@ -555,13 +556,15 @@ class ParameterServer:
         allowing all ranks to synchronize regardless of which process group
         they belong to.
 
-        Args:
-            store: The TCPStore instance to use for synchronization.
+        ``_store_based_barrier`` is a one-shot initialization barrier: its
+        completion key remains in the store. Use a new group name for every
+        call so this method remains reusable with the shared root store.
         """
+        self._store_barrier_counter += 1
         torch.distributed.distributed_c10d._store_based_barrier(
             rank=self._rank,
             store=self._store,
-            group_name="parameter_server_barrier",
+            group_name=f"parameter_server_barrier-{self._store_barrier_counter}",
             rendezvous_count=self._world_size,
             timeout=timeout,
         )
