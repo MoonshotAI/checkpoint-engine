@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import tempfile
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -113,8 +114,18 @@ def update_weights(
     with timer("Gather metas"):
         ps.gather_metas(checkpoint_name)
     if save_metas_file and int(os.getenv("RANK")) == 0:
-        with open(save_metas_file, "wb") as f:
-            f.write(_METAS_ADAPTER.dump_json(ps.get_metas()))
+        data = _METAS_ADAPTER.dump_json(ps.get_metas())
+        dir_name = os.path.dirname(save_metas_file) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, save_metas_file)
+        except BaseException:
+            os.unlink(tmp_path)
+            raise
 
     if update_method == "broadcast" or update_method == "all":
         with timer("Update weights without setting ranks"):
