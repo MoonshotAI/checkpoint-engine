@@ -51,12 +51,12 @@ class P2PStore:
     def register_named_tensors(self, named_tensors: dict[str, torch.Tensor]):
         buffer_addresses = [tensor.data_ptr() for tensor in named_tensors.values()]
         capacities = [tensor.nbytes for tensor in named_tensors.values()]
-        self.named_tensors.update(named_tensors)
         for i, name in enumerate(named_tensors.keys()):
             logger.info(
                 f"[rank{self.rank}] p2p store register tensor {name} with addr {hex(buffer_addresses[i])} and capacity {capacities[i]}"
             )
         assert self.engine.batch_register_memory(buffer_addresses, capacities) == 0
+        self.named_tensors.update(named_tensors)
 
     def unregister_named_tensors(self, names: list[str]) -> int:
         buffer_addresses = [self.named_tensors[name].data_ptr() for name in names]

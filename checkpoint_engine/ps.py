@@ -295,7 +295,9 @@ class ParameterServer:
         return self._current_global_parameter_metas
 
     def load_metas(self, metas: dict[int, MemoryBufferMetaList]):
-        self._current_global_parameter_metas = metas
+        self._current_global_parameter_metas = {
+            rank: meta for rank, meta in metas.items() if meta.memory_buffer_metas_list
+        }
         self._remote_rdma_devices = defaultdict(set)
         for i, meta in self._current_global_parameter_metas.items():
             assert meta.rdma_device is not None, "meta.rdma_device should not be None"
@@ -781,9 +783,14 @@ class ParameterServer:
             if checkpoint_name != self._current_shared_memory_pool_user
             else self.shared_memory_pool_name
         )
-        return self._p2p_store.unregister_named_tensors(
-            [f"memory_pool_{unregister_name}_{idx}" for idx, _ in enumerate(pool)]
-        )
+        names = [
+            name
+            for idx, _ in enumerate(pool)
+            if (name := f"memory_pool_{unregister_name}_{idx}") in self._p2p_store.named_tensors
+        ]
+        if not names:
+            return 0
+        return self._p2p_store.unregister_named_tensors(names)
 
     def _update_per_bucket(
         self,

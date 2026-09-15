@@ -78,8 +78,11 @@ def _get_rdma_devices() -> list[str]:
     if devices_str:
         return devices_str.split(",")
     # if PS_P2P_STORE_RDMA_DEVICES is not set, try to use NCCL_IB_HCA to get RDMA devices
-    hca = os.getenv("NCCL_IB_HCA", None)
-    return _parse_NCCL_IB_HCA(hca or "", _ibv_get_device_list()) or _ibv_get_device_list()
+    hca = os.getenv("NCCL_IB_HCA")
+    devices = _ibv_get_device_list()
+    if hca is not None:
+        return _parse_NCCL_IB_HCA(hca, devices)
+    return devices
 
 
 def _get_my_rdma_device(local_rank: int, gpu_count: int, devices: list[str]) -> str:
@@ -141,6 +144,8 @@ def _parse_NCCL_IB_HCA(value: str, available_devices: list[str]) -> list[str]:
         value = value.removeprefix("=")
 
     device_specs = [spec.strip() for spec in value.split(",") if spec.strip()]
+    if is_exclude and not device_specs:
+        return []
 
     result = _resolve_device_specs(device_specs, is_exact_match, available_devices)
     if is_exclude:
@@ -164,7 +169,7 @@ def _resolve_device_specs(
         # port = parts[1].strip() if len(parts) > 1 else None
         base_devices = (
             [device_name]
-            if device_name in available_devices
+            if is_exact_match and device_name in available_devices
             else []
             if is_exact_match
             else [dev for dev in available_devices if dev.startswith(device_name)]
