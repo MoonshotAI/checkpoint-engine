@@ -4,8 +4,9 @@ import time
 
 import pytest
 import torch.distributed as dist
-from test_update import device_manager, gen_test_tensors, get_world_size
+from test_update import gen_test_tensors, get_world_size
 
+from checkpoint_engine.device_utils import DeviceManager
 from checkpoint_engine.ps import ParameterServer
 
 
@@ -49,9 +50,10 @@ def run_pin_and_unpin(num_runs: int):
 
 
 @pytest.mark.gpu
-def test_unpin_files():
+def test_unpin_files(device_manager: DeviceManager):
     world_size = device_manager.device_module.device_count()
-    assert world_size >= 2, "This test requires at least 2 GPUs."
+    if world_size < 2:
+        pytest.skip("This test requires at least 2 GPUs/NPUs.")
     master_addr = "localhost"
     master_port = 25400
     cmd = [
