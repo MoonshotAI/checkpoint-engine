@@ -13,6 +13,7 @@ def test_store_based_barrier_uses_unique_group_name() -> None:
     ps._world_size = 2
     ps._store = Mock()
     ps._store_barrier_counter = 0
+    ps._store_barrier_trash = []
     timeout = timedelta(seconds=5)
 
     target = "torch.distributed.distributed_c10d._store_based_barrier"
@@ -40,16 +41,22 @@ def test_store_based_barrier_is_reusable_with_shared_tcp_store() -> None:
         ps._world_size = 2
         ps._store = store
         ps._store_barrier_counter = 0
+        ps._store_barrier_trash = []
         parameter_servers.append(ps)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        for _ in range(2):
+        for _ in range(10):
             futures = [executor.submit(ps.store_based_barrier, timeout) for ps in parameter_servers]
             for future in futures:
                 future.result()
 
     prefix = dist.distributed_c10d.STORE_BASED_BARRIER_PREFIX
-    for generation in (1, 2):
+    for generation in range(1, 9):
+        store_key = f"{prefix}:parameter_server_barrier-{generation}"
+        assert not server_store.check([store_key])
+        assert not server_store.check([f"{store_key}:last_worker"])
+
+    for generation in (9, 10):
         store_key = f"{prefix}:parameter_server_barrier-{generation}"
         assert server_store.add(store_key, 0) == 2
         assert server_store.get(f"{store_key}:last_worker") == b"1"
