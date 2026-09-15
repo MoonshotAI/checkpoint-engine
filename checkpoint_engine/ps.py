@@ -273,6 +273,8 @@ class ParameterServer:
             is_master=self._rank == 0,
         )
         self._store_counter = 0
+        self._store_barrier_counter = 0
+        self._store_barrier_trash: list[str] = []
 
     def _get_memory_pool(self, checkpoint_name: str) -> list[MemoryBuffer]:
         if checkpoint_name == self._current_shared_memory_pool_user:
@@ -555,16 +557,51 @@ class ParameterServer:
         allowing all ranks to synchronize regardless of which process group
         they belong to.
 
-        Args:
-            store: The TCPStore instance to use for synchronization.
+        ``_store_based_barrier`` is a one-shot initialization barrier: its
+        completion key remains in the store. Use a new group name for every
+        call so this method remains reusable with the shared root store.
         """
+        self._store_barrier_counter += 1
+        group_name = f"parameter_server_barrier-{self._store_barrier_counter}"
         torch.distributed.distributed_c10d._store_based_barrier(
             rank=self._rank,
             store=self._store,
-            group_name="parameter_server_barrier",
+            group_name=group_name,
             rendezvous_count=self._world_size,
             timeout=timeout,
         )
+        self._delete_stale_store_barrier_keys(group_name)
+
+    def _delete_stale_store_barrier_keys(self, group_name: str) -> None:
+        """Delete keys left by barrier generations that no rank can still use.
+
+        Every generation leaves a counter key and a ``last_worker`` key in the
+        shared root store. Rank 0 retains the two latest generations. Once it
+        completes generation N + 2, every rank has entered that generation and
+        therefore has already returned from generation N, so N's keys are safe
+        to delete.
+        """
+        if self._rank != 0:
+            return
+
+        self._store_barrier_trash.append(group_name)
+        if len(self._store_barrier_trash) <= 2:
+            return
+
+        stale_group_name = self._store_barrier_trash.pop(0)
+        prefix = torch.distributed.distributed_c10d.STORE_BASED_BARRIER_PREFIX
+        store_key = f"{prefix}:{stale_group_name}"
+        for key in (store_key, f"{store_key}:last_worker"):
+            self._delete_stale_store_key(key)
+
+    def _delete_stale_store_key(self, key: str) -> None:
+        try:
+            deleted = self._store.delete_key(key)
+        except RuntimeError as e:
+            logger.warning(f"[rank{self._rank}] failed to delete stale barrier key {key}: {e}")
+        else:
+            if not deleted:
+                logger.warning(f"[rank{self._rank}] stale barrier key {key} is already absent")
 
     def update(
         self,
