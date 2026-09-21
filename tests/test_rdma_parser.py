@@ -201,3 +201,39 @@ def test_get_my_rdma_device_invalid_config(
     """Test _get_my_rdma_device with invalid configuration"""
     with pytest.raises(error):
         _get_my_rdma_device(local_rank, gpu_count, devices)
+
+
+def test_ibv_get_device_list_returns_empty_when_libibverbs_is_missing() -> None:
+    """A host without rdma-core has no RDMA devices, and the loader error must not escape."""
+    with patch(
+        "ctypes.CDLL",
+        side_effect=OSError("libibverbs.so.1: cannot open shared object file"),
+    ):
+        assert _ibv_get_device_list() == []
+
+
+def test_get_my_rdma_device_reports_no_devices_without_rdma_core() -> None:
+    """The user-facing error on a host with no RDMA devices must be the actionable one."""
+    with (
+        patch(
+            "ctypes.CDLL",
+            side_effect=OSError("libibverbs.so.1: cannot open shared object file"),
+        ),
+        pytest.raises(RuntimeError, match="no rdma devices found"),
+    ):
+        _get_my_rdma_device(0, 8, _get_rdma_devices())
+
+
+def test_get_rdma_devices_enumerates_the_hca_list_once(
+    mock_available_devices: list[str],
+) -> None:
+    """When NCCL_IB_HCA parses to nothing, the fallback must not re-enumerate the HCA list."""
+    with (
+        patch.dict(os.environ, {"NCCL_IB_HCA": "None"}, clear=True),
+        patch(
+            "checkpoint_engine.device_utils._ibv_get_device_list",
+            return_value=mock_available_devices,
+        ) as enumerate_devices,
+    ):
+        assert _get_rdma_devices() == mock_available_devices
+        enumerate_devices.assert_called_once()

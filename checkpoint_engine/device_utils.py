@@ -48,7 +48,13 @@ def npu_generate_uuid() -> str:
 
 
 def _ibv_get_device_list() -> list[str]:
-    lib = ctypes.CDLL("libibverbs.so.1")
+    try:
+        lib = ctypes.CDLL("libibverbs.so.1")
+    except OSError:
+        # rdma-core is not installed, so there are no RDMA devices to enumerate. Returning an
+        # empty list lets _get_my_rdma_device() raise its own "no rdma devices found" instead of
+        # letting the loader's "cannot open shared object file" escape from this helper.
+        return []
     lib.ibv_get_device_list.argtypes = [ctypes.POINTER(ctypes.c_int)]  # int *num_devices
     lib.ibv_get_device_list.restype = ctypes.POINTER(ctypes.c_void_p)  # struct ibv_device **
 
@@ -79,7 +85,8 @@ def _get_rdma_devices() -> list[str]:
         return devices_str.split(",")
     # if PS_P2P_STORE_RDMA_DEVICES is not set, try to use NCCL_IB_HCA to get RDMA devices
     hca = os.getenv("NCCL_IB_HCA", None)
-    return _parse_NCCL_IB_HCA(hca or "", _ibv_get_device_list()) or _ibv_get_device_list()
+    available_devices = _ibv_get_device_list()
+    return _parse_NCCL_IB_HCA(hca or "", available_devices) or available_devices
 
 
 def _get_my_rdma_device(local_rank: int, gpu_count: int, devices: list[str]) -> str:
