@@ -30,6 +30,19 @@ class P2PStore:
             )
             if ret == 0:
                 break
+            # A failed initialize() can leave native sockets/fds/shared-memory
+            # state held by this TransferEngine instance (e.g. a bound port).
+            # The Python bindings expose no close/destroy/shutdown method
+            # (mooncake-transfer-engine's compiled extension only binds
+            # initialize/initialize_ext/allocate_managed_buffer/
+            # free_managed_buffer/transfer_sync*/(un)register_memory/
+            # *_bytes_to_buffer/get_first_buffer_address), so drop the last
+            # Python reference here to let refcounting release the native
+            # engine before the next attempt constructs a new one -- without
+            # this, the next TransferEngine() runs while the failed one is
+            # still alive and can collide with the very resource it left
+            # behind.
+            del self.engine
             # sleep 0.5 ~ 2.0s, to avoid port conflicts when two processes retry at the same time
             sleep_ms = random.randint(500, 2000)
             logger.warning(
