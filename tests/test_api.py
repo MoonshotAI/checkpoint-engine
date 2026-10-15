@@ -109,10 +109,60 @@ def test_load_metas_rejects_schema_mismatch(ps_mock: MagicMock) -> None:
     ps_mock.load_metas.assert_not_called()
 
 
-def test_load_metas_propagates_ps_error(
-    ps_mock: MagicMock, fake_metas: dict[int, MemoryBufferMetaList]
+@pytest.mark.parametrize("dtype", [None, "torch.Tensor", "torch.not_a_real_dtype", 1, {}])
+def test_load_metas_rejects_invalid_dtype(
+    ps_mock: MagicMock, fake_metas: dict[int, MemoryBufferMetaList], dtype: object
 ) -> None:
-    ps_mock.load_metas.side_effect = RuntimeError("rdma device mismatch")
+    payload = _METAS_ADAPTER.dump_python(fake_metas, mode="json")
+    payload["0"]["memory_buffer_metas_list"][0]["metas"][0]["dtype"] = dtype
+    client = TestClient(_init_api(ps_mock), raise_server_exceptions=False)
+
+    resp = client.post("/v1/metas", json=payload)
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"][0]["loc"] == [
+        "body",
+        "0",
+        "memory_buffer_metas_list",
+        0,
+        "metas",
+        0,
+        "dtype",
+    ]
+    ps_mock.load_metas.assert_not_called()
+
+
+@pytest.mark.parametrize("shape", ["2,3", [2, "3"], None, {}])
+def test_load_metas_rejects_invalid_shape(
+    ps_mock: MagicMock, fake_metas: dict[int, MemoryBufferMetaList], shape: object
+) -> None:
+    payload = _METAS_ADAPTER.dump_python(fake_metas, mode="json")
+    payload["0"]["memory_buffer_metas_list"][0]["metas"][0]["shape"] = shape
+    client = TestClient(_init_api(ps_mock), raise_server_exceptions=False)
+
+    resp = client.post("/v1/metas", json=payload)
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"][0]["loc"] == [
+        "body",
+        "0",
+        "memory_buffer_metas_list",
+        0,
+        "metas",
+        0,
+        "shape",
+    ]
+    ps_mock.load_metas.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("rdma device mismatch"), TypeError("backend dtype"), ValueError("backend data")],
+)
+def test_load_metas_propagates_ps_error(
+    ps_mock: MagicMock, fake_metas: dict[int, MemoryBufferMetaList], error: Exception
+) -> None:
+    ps_mock.load_metas.side_effect = error
     client = TestClient(_init_api(ps_mock))
     resp = client.post(
         "/v1/metas",
@@ -120,7 +170,7 @@ def test_load_metas_propagates_ps_error(
         headers={"content-type": "application/json"},
     )
     assert resp.status_code == 500
-    assert "rdma device mismatch" in resp.text
+    assert str(error) in resp.text
 
 
 def test_round_trip_get_then_load(

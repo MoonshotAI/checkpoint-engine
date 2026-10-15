@@ -28,7 +28,8 @@ def _dt_validate(value: Any) -> torch.dtype:
         except AttributeError as e:
             raise ValueError(f"unknown dtype: {value}") from e
     if not isinstance(value, torch.dtype):
-        raise TypeError(f"dtype {value} should be torch.dtype, got {type(value)}")
+        # Pydantic V2 does not convert TypeError into a validation error.
+        raise ValueError(f"dtype {value} should be torch.dtype, got {type(value)}")  # noqa: TRY004
     return value
 
 
@@ -42,9 +43,13 @@ _TorchDtype = Annotated[
 
 def _size_validate(value: Any) -> torch.Size:
     if isinstance(value, list | tuple):
-        return torch.Size(value)
+        try:
+            return torch.Size(value)
+        except TypeError as e:
+            raise ValueError(f"size {value} should contain integers") from e
     if not isinstance(value, torch.Size):
-        raise TypeError(f"size {value} should be torch.Size, got {type(value)}")
+        # Pydantic V2 does not convert TypeError into a validation error.
+        raise ValueError(f"size {value} should be torch.Size, got {type(value)}")  # noqa: TRY004
     return value
 
 
