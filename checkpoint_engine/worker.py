@@ -210,6 +210,10 @@ class VllmColocateWorkerExtension:
                 and getattr(self.model_runner.drafter, "model", None) is not None
             ):
                 self.model_runner.drafter.model.load_weights(weights=weights)
+            if getattr(self.model_runner, "get_draft_model", None) is not None:
+                draft_model = self.model_runner.get_draft_model()
+                if draft_model is not None:
+                    draft_model.load_weights(weights=weights)
 
         def _post_hook():
             process_weights_after_loading(self.model_runner.model, self.model_config, self.device)
@@ -221,6 +225,14 @@ class VllmColocateWorkerExtension:
                 process_weights_after_loading(
                     self.model_runner.drafter.model, self.model_config, self.device
                 )
+            elif getattr(self.model_runner, "get_draft_model", None) is not None:
+                draft_model = self.model_runner.get_draft_model()
+                if draft_model is not None:
+                    process_weights_after_loading(
+                        draft_model,
+                        self.vllm_config.speculative_config.draft_model_config,
+                        self.device,
+                    )
 
         update_weights_from_ipc(
             self._zmq_ctx,
