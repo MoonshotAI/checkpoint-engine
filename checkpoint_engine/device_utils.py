@@ -26,20 +26,49 @@ def get_ip() -> str:
         return socket.gethostbyname(socket.gethostname())
 
 
+def _get_npu_visible_physical_ids() -> list[int]:
+    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
+    if not visible_devices:
+        return []
+    npu_ids = []
+    for device_id in visible_devices.split(","):
+        device_id = device_id.strip()
+        if device_id.isdigit():
+            npu_ids.append(int(device_id))
+    return npu_ids
+
+
+def _get_npu_ids_to_scan() -> range | list[int]:
+    visible_physical_ids = _get_npu_visible_physical_ids()
+    if visible_physical_ids:
+        return visible_physical_ids
+
+    npu = getattr(torch, "npu", None)
+    device_count = getattr(npu, "device_count", None)
+    if callable(device_count):
+        count = int(device_count())
+        if count > 0:
+            return range(max(8, count))
+    return range(8)
+
+
 def npu_generate_uuid() -> str:
     str_pid = str(os.getpid())
-    npu_num = 8
     try:
-        for npu_id in range(npu_num):
+        for npu_id in _get_npu_ids_to_scan():
             cmd = ["npu-smi", "info", "-t", "proc-mem", "-i", str(npu_id)]
             result = subprocess.run(cmd, check=True, capture_output=True, text=True)  # noqa: S603
             str_result = str(result.stdout)
             if str_pid in str_result:
                 # In A3 server, one NPU has two chips.
                 match_chip_count = re.search(r"Chip Count[^\d]*(\d+)", str_result)
+                if match_chip_count is None:
+                    raise ValueError(f"Failed to parse NPU chip count for npu_id {npu_id}")
                 chip_count = int(match_chip_count.group(1))
                 search_after_pid = str_result[str_result.find(str_pid) + len(str_pid) :]
                 match_chip_id = re.search(r"Chip ID[^\d]*(\d+)", search_after_pid)
+                if match_chip_id is None:
+                    raise ValueError(f"Failed to parse NPU chip id for npu_id {npu_id}")
                 chip_id = int(match_chip_id.group(1))
                 return f"{get_ip()}-{npu_id * chip_count + chip_id}"
         raise ValueError("The current process is not running on the npu device")
