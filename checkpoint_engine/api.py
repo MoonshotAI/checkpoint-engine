@@ -31,15 +31,16 @@ def request_inference_to_update(
         httpx.HTTPStatusError: If the response contains an HTTP error status.
         httpx.RequestError: If there was an issue while making the request.
     """
-    resp = httpx.Client(transport=httpx.HTTPTransport(uds=uds)).post(
-        url,
-        json={
-            "method": "update_weights_from_ipc",
-            "args": [socket_paths],
-            "timeout": timeout,
-        },
-        timeout=timeout,
-    )
+    with httpx.Client(transport=httpx.HTTPTransport(uds=uds)) as client:
+        resp = client.post(
+            url,
+            json={
+                "method": "update_weights_from_ipc",
+                "args": [socket_paths],
+                "timeout": timeout,
+            },
+            timeout=timeout,
+        )
     resp.raise_for_status()
 
 
