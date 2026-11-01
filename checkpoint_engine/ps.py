@@ -335,15 +335,20 @@ class ParameterServer:
                 f"[rank{self._rank}] Only cuda devices support in-place pin memory, set use_inplace_pin_memory to False"
             )
             use_inplace_pin_memory = False
+        if use_shared_memory_pool:
+            assert self._current_shared_memory_pool_user == "", (
+                f"cannot register checkpoint {checkpoint_name} to shared memory pool, "
+                f"since checkpoint {self._current_shared_memory_pool_user} is already using shared memory pool. "
+                f"This registration may cause unexpected conflicts."
+            )
+        else:
+            assert checkpoint_name not in self._memory_pool, (
+                f"checkpoint {checkpoint_name} already registered"
+            )
         try:
             if use_shared_memory_pool:
                 logger.info(
                     f"[rank{self._rank}] checkpoint {checkpoint_name} use shared memory pool"
-                )
-                assert self._current_shared_memory_pool_user == "", (
-                    f"cannot register checkpoint {checkpoint_name} to shared memory pool, "
-                    f"since checkpoint {self._current_shared_memory_pool_user} is already using shared memory pool. "
-                    f"This registration may cause unexpected conflicts."
                 )
                 # Since we set the uninitialized shared memory pool to empty list,
                 # we can check whether this is the first time to use shared memory pool
@@ -359,9 +364,6 @@ class ParameterServer:
                 if self._p2p_store is not None and _is_first_time:
                     self._register_parameters_to_p2p_store(checkpoint_name)
             else:
-                assert checkpoint_name not in self._memory_pool, (
-                    f"checkpoint {checkpoint_name} already registered"
-                )
                 self._memory_pool[checkpoint_name] = _register_checkpoint(
                     files=files or [],
                     named_tensors=named_tensors or {},
