@@ -324,7 +324,10 @@ def _normal_pin_memory(
             return idx, buffer
 
     def register_tensor(buffer: torch.Tensor, offset: int, tensor: torch.Tensor):
-        buffer[offset : offset + tensor.nbytes] = tensor.view(-1).view(dtype=torch.uint8)
+        with torch.no_grad():
+            buffer[offset : offset + tensor.nbytes].view(tensor.dtype).view(tensor.shape).copy_(
+                tensor
+            )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
         futures = [
