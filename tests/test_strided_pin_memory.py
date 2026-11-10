@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 import torch
 
@@ -58,4 +60,42 @@ def test_register_strided_weights_to_pinned_memory(source: str) -> None:
     buffers = _normal_pin_memory(files=[], named_tensors=weights)
 
     assert all(bucket.buffer.is_pinned() for bucket in buffers)
+    _check_weights(weights, buffers, "cuda")
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_register_strided_cuda_copies_do_not_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
+    weights = {f"weight{i}": torch.randn(8, 16, device="cuda").t() for i in range(4)}
+    original_copy = torch.Tensor.copy_
+    count_lock = threading.Lock()
+    second_started = threading.Event()
+    active = 0
+    maximum = 0
+    copies = 0
+
+    def track_copy(target: torch.Tensor, source: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        nonlocal active, maximum, copies
+        if not source.is_cuda or source.is_contiguous():
+            return original_copy(target, source, *args, **kwargs)
+        with count_lock:
+            active += 1
+            maximum = max(maximum, active)
+            copies += 1
+            first = copies == 1
+            if active > 1:
+                second_started.set()
+        try:
+            if first:
+                second_started.wait(timeout=1)
+            return original_copy(target, source, *args, **kwargs)
+        finally:
+            with count_lock:
+                active -= 1
+
+    monkeypatch.setattr(torch.Tensor, "copy_", track_copy)
+    buffers = _normal_pin_memory(files=[], named_tensors=weights)
+
+    assert copies == len(weights)
+    assert maximum == 1
     _check_weights(weights, buffers, "cuda")
