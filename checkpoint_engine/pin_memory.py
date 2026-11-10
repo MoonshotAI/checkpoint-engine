@@ -2,6 +2,7 @@ import concurrent.futures
 import json
 import os
 import pickle
+import threading
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 import numpy as np
@@ -323,8 +324,18 @@ def _normal_pin_memory(
             buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
             return idx, buffer
 
+    # A non-contiguous CUDA-to-CPU copy materializes a temporary on the GPU.
+    # Limit the peak to one such temporary per registration.
+    strided_cuda_copy_lock = threading.Lock()
+
     def register_tensor(buffer: torch.Tensor, offset: int, tensor: torch.Tensor):
-        buffer[offset : offset + tensor.nbytes] = tensor.view(-1).view(dtype=torch.uint8)
+        with torch.no_grad():
+            target = buffer[offset : offset + tensor.nbytes].view(tensor.dtype).view(tensor.shape)
+            if tensor.is_cuda and not tensor.is_contiguous():
+                with strided_cuda_copy_lock:
+                    target.copy_(tensor)
+            else:
+                target.copy_(tensor)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
         futures = [
