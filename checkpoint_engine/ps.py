@@ -315,7 +315,8 @@ class ParameterServer:
     ) -> None:
         """
         Register a checkpoint to the parameter server. Both files and named_tensors will be registered together.
-        Warning: if `use_inplace_pin_memory` is True, .safetensors files in /dev/shm/ will be pinned in-place, and the files will be REMOVED after pinning.
+        Warning: if `use_inplace_pin_memory` is True, .safetensors files in /dev/shm/ will be pinned in-place and removed after pinning when possible.
+        If removal fails, a warning is logged.
         Please make sure to copy the files to disks if you need to keep them. NPU does not support inplace pin memory.
 
         Args:

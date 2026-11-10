@@ -2,6 +2,7 @@ import concurrent.futures
 import json
 import os
 import pickle
+import threading
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 import numpy as np
@@ -192,6 +193,8 @@ def _load_checkpoint(files: list[str]) -> dict[str, torch.Tensor]:
 
 def _inplace_pin_memory(files: list[str], rank: int | None = None) -> list[MemoryBuffer]:
     device_index = torch.cuda.current_device()
+    registrations: list[MemoryBuffer] = []
+    registrations_lock = threading.Lock()
 
     def _parse_and_pin_from_safetensors(file_path: str) -> MemoryBuffer:
         """
@@ -253,24 +256,44 @@ def _inplace_pin_memory(files: list[str], rank: int | None = None) -> list[Memor
         assert offset == buffer.nbytes, (
             f"offset {offset} should be equal to buffer.nbytes {buffer.nbytes}"
         )
-        # Remove the file after successfully loading. This will avoid doubling the memory usage.
-        # We assume files in /dev/shm/ are temporary files. So it's safe to remove them after loading.
-        os.remove(file_path)
         if not metas:
             # TODO: should we still return this buffer?
             assert buffer.nbytes == 0, f"buffer nbytes {buffer.nbytes} should be 0"
             logger.warning(f"[rank{rank}] no metas found in {file_path}, skip pin memory")
             return MemoryBuffer(buffer=buffer, size=buffer.nbytes, metas=[], manually_pinned=False)
 
+        memory_buffer = MemoryBuffer(buffer=buffer, size=buffer.nbytes, metas=metas)
+        with registrations_lock:
+            registrations.append(memory_buffer)
         _pin(buffer)
-        logger.info(
-            f"[rank{rank}] inplace pin memory for file {file_path} finished, size {buffer.nbytes / 1024 / 1024:.2f}MiB"
-        )
-        return MemoryBuffer(buffer=buffer, size=buffer.nbytes, metas=metas, manually_pinned=True)
+        memory_buffer.manually_pinned = True
+        return memory_buffer
 
-    memory_buffers: list[MemoryBuffer] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
-        memory_buffers = list(executor.map(_parse_and_pin_from_safetensors, files))
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+            memory_buffers = list(executor.map(_parse_and_pin_from_safetensors, files))
+    except BaseException:
+        # Executor shutdown has joined all workers, including jobs still running after a failure.
+        for memory_buffer in registrations:
+            if memory_buffer.manually_pinned:
+                try:
+                    r = torch.cuda.cudart().cudaHostUnregister(memory_buffer.buffer.data_ptr())
+                    if r != 0:
+                        logger.error(f"[rank{rank}] failed to roll back pinned memory: {r}")
+                except Exception:  # noqa: BLE001
+                    logger.exception(f"[rank{rank}] failed to roll back pinned memory")
+        raise
+
+    # Unlinking is best effort once the buffers are registered.
+    for file, memory_buffer in zip(files, memory_buffers):
+        try:
+            os.remove(file)
+        except OSError as e:
+            logger.warning(f"[rank{rank}] failed to remove {file}: {e}")
+        if memory_buffer.manually_pinned:
+            logger.info(
+                f"[rank{rank}] inplace pin memory for file {file} finished, size {memory_buffer.size / 1024 / 1024:.2f}MiB"
+            )
     return memory_buffers
 
 
