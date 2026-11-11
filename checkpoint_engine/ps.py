@@ -32,6 +32,10 @@ if TYPE_CHECKING:
     from checkpoint_engine.data_types import T
 
 
+class _WorkerUpdateError(RuntimeError):
+    """A worker error already agreed on by the update group."""
+
+
 def _to_named_tensor(metas: list[ParameterMeta], offset: int = 0) -> list[dict]:
     ret = []
     for meta in metas:
@@ -575,8 +579,8 @@ class ParameterServer:
     def _delete_stale_store_barrier_keys(self, group_name: str) -> None:
         """Delete keys left by barrier generations that no rank can still use.
 
-        Every generation leaves a counter key and a ``last_worker`` key in the
-        shared root store. Rank 0 retains the two latest generations. Once it
+        Every generation leaves a counter and ``last_worker`` key, and may have
+        an update failure marker. Rank 0 retains the two latest generations. Once it
         completes generation N + 2, every rank has entered that generation and
         therefore has already returned from generation N, so N's keys are safe
         to delete.
@@ -593,14 +597,15 @@ class ParameterServer:
         store_key = f"{prefix}:{stale_group_name}"
         for key in (store_key, f"{store_key}:last_worker"):
             self._delete_stale_store_key(key)
+        self._delete_stale_store_key(f"{stale_group_name}:update_failed", missing_ok=True)
 
-    def _delete_stale_store_key(self, key: str) -> None:
+    def _delete_stale_store_key(self, key: str, *, missing_ok: bool = False) -> None:
         try:
             deleted = self._store.delete_key(key)
         except RuntimeError as e:
             logger.warning(f"[rank{self._rank}] failed to delete stale barrier key {key}: {e}")
         else:
-            if not deleted:
+            if not deleted and not missing_ok:
                 logger.warning(f"[rank{self._rank}] stale barrier key {key} is already absent")
 
     def update(
@@ -634,11 +639,30 @@ class ParameterServer:
                 self.init_process_group(timeout=timeout)
             # if ranks is None or [], it will use fully broadcast to update to all ranks
             ranks_group = dist.new_group(ranks) if ranks else None
-            # `with` releases the exported IPC handle on every exit path, including a
-            # failure before the broadcast loop's own cleanup starts.
-            with build_ipc_handler(self.device_manager) as ipc_handler:
-                self._update_per_bucket(checkpoint_name, req_func, ipc_handler, ranks_group, ranks)
+            # P2P nonparticipants still enter the world-wide store barrier. Publish
+            # group-agreed worker failures before it so all ranks leave consistently.
+            failure_key = (
+                f"parameter_server_barrier-{self._store_barrier_counter + 1}:update_failed"
+                if ranks
+                else None
+            )
+            update_error = None
+            try:
+                # Release the IPC handle on every exit path.
+                with build_ipc_handler(self.device_manager) as ipc_handler:
+                    self._update_per_bucket(
+                        checkpoint_name, req_func, ipc_handler, ranks_group, ranks
+                    )
+            except _WorkerUpdateError as e:
+                if failure_key is None:
+                    raise
+                update_error = e
+                self._store.set(failure_key, "1")
             self.store_based_barrier()
+            if update_error is not None:
+                raise update_error  # noqa: TRY301
+            if failure_key is not None and self._store.check([failure_key]):
+                raise RuntimeError("Failed to update weights due to errors on another rank")  # noqa: TRY301
         except Exception as e:
             logger.exception(
                 f"[rank{self._rank}] update checkpoint {checkpoint_name} with ranks {ranks} error {e}"
@@ -888,6 +912,22 @@ class ParameterServer:
         gidx = 0
         ret_code = torch.zeros((), device=self.device_manager.device_type, dtype=torch.int64)
         buffer_b: torch.Tensor | None = None
+
+        def check_worker_response() -> None:
+            resp = socket.recv()
+            if resp != b"":
+                msg = resp.decode("utf-8")
+                logger.error(
+                    f"[rank{self._rank}] receive error response from worker after {gidx} buckets in checkpoint {checkpoint_name}: {msg}"
+                )
+                ret_code.fill_(1)
+            dist.all_reduce(ret_code, op=torch.distributed.ReduceOp.SUM, group=ranks_group)
+            self.device_manager.device_module.synchronize()
+            if ret_code.item() != 0:
+                # All ranks must stop their workers if any worker failed.
+                socket.send_pyobj(RuntimeError("Some workers failed to update weights"))
+                raise _WorkerUpdateError("Failed to update weights due to remote errors")
+
         try:
             for i in range(max_len):
                 if i < len(receiver_rank_buckets) and not disable_h2d_buffer:
@@ -925,23 +965,11 @@ class ParameterServer:
                         else:
                             buffer_b.data.copy_(h2d_buffer[: bucket.size])
                     dist.broadcast(buffer_b, src=receiver_rank, group=ranks_group)
-                    resp = socket.recv()
-                    if resp != b"":
-                        msg = resp.decode("utf-8")
-                        logger.error(
-                            f"[rank{self._rank}] receive error response from rank {receiver_rank} for bucket {gidx} in checkpoint {checkpoint_name}: {msg}"
-                        )
-                        ret_code.fill_(1)
-                    dist.all_reduce(ret_code, op=torch.distributed.ReduceOp.SUM, group=ranks_group)
-                    self.device_manager.device_module.synchronize()
-                    if ret_code.item() != 0:
-                        # quit early if any rank failed
-                        socket.send_pyobj(RuntimeError("Some workers failed to update weights"))
-                        raise RuntimeError("Failed to update weights due to remote errors")
+                    check_worker_response()
                     socket.send_pyobj(_to_named_tensor(bucket.items, gidx % 2 * bucket_size))
                     gidx += 1
 
-            socket.recv()
+            check_worker_response()
             device_mem = self.device_manager.device_module.mem_get_info()
             logger.info(
                 f"[rank{self._rank}] weights broadcast done, device mem usage: {(device_mem[1] - device_mem[0]) / 1024 / 1024:.2f} MB, allocated memory: {self.device_manager.device_module.memory_allocated() / 1024 / 1024:.2f} MB, reserved memory: {self.device_manager.device_module.memory_reserved() / 1024 / 1024:.2f} MB"
